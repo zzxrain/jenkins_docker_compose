@@ -1,0 +1,6 @@
+.env
+data/
+backup/output/
+*.tar.gz
+*.key
+id_*

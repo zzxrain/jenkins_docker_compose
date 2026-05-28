@@ -1,0 +1,17 @@
+configuration-as-code:2081.v2d0940662a_34
+git:5.10.1
+workflow-aggregator:608.v67378e9d3db_1
+credentials-binding:725.ve52b_2328a_fde
+ssh-slaves:3.1097.v868116049892
+matrix-auth:3.2.10
+docker-workflow:634.vedc7242b_eda_7
+cloudbees-folder:6.1100.ve9eed61d16c4
+job-dsl:3654.vdf58f53e2d15
+pipeline-graph-view:916.v5904b_09231c5
+pipeline-stage-view:2.41
+timestamper:1.30
+ws-cleanup:0.49
+ansicolor:536.v13fa_b_860c267
+pipeline-utility-steps:3.810.va_7672d206740
+http_request:1.25
+junit:1403.vd9d1413fd205

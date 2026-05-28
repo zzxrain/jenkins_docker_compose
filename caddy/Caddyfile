@@ -1,0 +1,10 @@
+jenkins.localhost:443 {
+    tls internal
+
+    reverse_proxy jenkins-controller:8080 {
+        header_up Host {host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Port {server_port}
+    }
+}

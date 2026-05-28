@@ -1,0 +1,89 @@
+services:
+  jenkins-controller:
+    build:
+      context: ./controller
+    image: local/jenkins-controller:2.555.2-lts-jdk21
+    container_name: jenkins-controller
+    ports:
+      - "127.0.0.1:8089:8080"
+    expose:
+      - "8080"
+    environment:
+      TZ: Asia/Shanghai
+      CASC_JENKINS_CONFIG: /var/jenkins_home/casc/jenkins.yaml
+      JENKINS_ADMIN_ID: "${JENKINS_ADMIN_ID}"
+      JENKINS_ADMIN_PASSWORD: "${JENKINS_ADMIN_PASSWORD}"
+      JAVA_OPTS: >-
+        -Djenkins.install.runSetupWizard=false
+    networks:
+      - jenkins
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - ./casc:/var/jenkins_home/casc:ro
+
+    caddy:
+      image: caddy:2
+      container_name: jenkins-caddy
+      ports:
+        - "8444:443"
+        - "8088:80"
+      networks:
+      - jenkins
+      volumes:
+        - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+        - caddy_data:/data
+        - caddy_config:/config
+      depends_on:
+        - jenkins-controller
+
+  ci-arm64-general:
+    build:
+      context: ./agents/base
+    image: jenkins/ssh-agent:jdk21
+    container_name: ci-arm64-general
+    environment:
+      TZ: Asia/Shanghai
+      JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY}"
+    networks:
+      - jenkins
+    volumes:
+      - ci_arm64_general_home:/home/jenkins/agent
+
+  ci-arm64-alm:
+    build:
+      context: ./agents/base
+    image: jenkins/ssh-agent:jdk21
+    container_name: ci-arm64-alm
+    environment:
+      TZ: Asia/Shanghai
+      JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY}"
+    networks:
+      - jenkins
+    volumes:
+      - ci_arm64_alm_home:/home/jenkins/agent
+
+  ci-arm64-docker:
+    build:
+      context: ./agents/docker
+    image: local/jenkins-ssh-agent-docker:debian-jdk21
+    container_name: ci-arm64-docker
+    environment:
+      TZ: Asia/Shanghai
+      JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY}"
+    networks:
+      - jenkins
+    volumes:
+      - ci_arm64_docker_home:/home/jenkins/agent
+      - /var/run/docker.sock:/var/run/docker.sock
+
+networks:
+  jenkins:
+    driver: bridge
+
+volumes:
+  jenkins_home:
+  ci_arm64_general_home:
+  ci_arm64_alm_home:
+  ci_arm64_docker_home:
+  caddy_data:
+  caddy_config:

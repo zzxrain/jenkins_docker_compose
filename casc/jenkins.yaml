@@ -1,0 +1,92 @@
+jenkins:
+  systemMessage: "Jenkins configured by JCasC for local Docker Compose CI environment."
+
+  numExecutors: 0
+
+  mode: NORMAL
+
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_ID}"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+  nodes:
+    - permanent:
+        name: "ci-arm64-general"
+        nodeDescription: "General-purpose ARM64 Linux SSH agent for normal CI tasks."
+        remoteFS: "/home/jenkins/agent"
+        numExecutors: 1
+        labelString: "ci arm64 linux general"
+        mode: EXCLUSIVE
+        retentionStrategy: "always"
+        launcher:
+          sSHLauncher:
+            host: "ci-arm64-general"
+            port: 22
+            credentialsId: "jenkins-agent-ssh-key"
+            launchTimeoutSeconds: 60
+            maxNumRetries: 3
+            retryWaitTime: 15
+            sshHostKeyVerificationStrategy:
+              nonVerifyingKeyVerificationStrategy: {}
+
+    - permanent:
+        name: "ci-arm64-alm"
+        nodeDescription: "ARM64 Linux SSH agent for ALM/PLM automation tasks such as Codebeamer and Windchill API integration."
+        remoteFS: "/home/jenkins/agent"
+        numExecutors: 1
+        labelString: "ci arm64 linux alm codebeamer windchill"
+        mode: EXCLUSIVE
+        retentionStrategy: "always"
+        launcher:
+          sSHLauncher:
+            host: "ci-arm64-alm"
+            port: 22
+            credentialsId: "jenkins-agent-ssh-key"
+            launchTimeoutSeconds: 60
+            maxNumRetries: 3
+            retryWaitTime: 15
+            sshHostKeyVerificationStrategy:
+              nonVerifyingKeyVerificationStrategy: {}
+
+    - permanent:
+        name: "ci-arm64-docker"
+        nodeDescription: "ARM64 Linux SSH agent with Docker CLI, Docker Compose plugin and Buildx support."
+        remoteFS: "/home/jenkins/agent"
+        numExecutors: 1
+        labelString: "ci arm64 linux docker buildx"
+        mode: EXCLUSIVE
+        retentionStrategy: "always"
+        launcher:
+          sSHLauncher:
+            host: "ci-arm64-docker"
+            port: 22
+            credentialsId: "jenkins-agent-ssh-key"
+            launchTimeoutSeconds: 60
+            maxNumRetries: 3
+            retryWaitTime: 15
+            sshHostKeyVerificationStrategy:
+              nonVerifyingKeyVerificationStrategy: {}
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - basicSSHUserPrivateKey:
+              scope: SYSTEM
+              id: "jenkins-agent-ssh-key"
+              username: "jenkins"
+              description: "SSH private key for static Docker SSH agents"
+              privateKeySource:
+                directEntry:
+                  privateKey: "${readFile:/run/secrets/jenkins_agent_key}"
+
+unclassified:
+  location:
+    url: "https://apps.locamac.net:8444/"
