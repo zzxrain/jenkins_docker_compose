@@ -135,3 +135,27 @@ make up
 - `ci-arm64-docker` 挂载 `/var/run/docker.sock`，便于学习 Docker 构建，但安全边界弱；生产环境建议改造为远程 BuildKit、rootless builder、Kubernetes agent 或独立构建集群。
 - 该仓库默认面向单机学习和企业架构模拟，不替代高可用 Jenkins Controller 架构。
 
+## Docker Socket Risk and Alternatives
+
+`ci-arm64-docker` mounts `/var/run/docker.sock` so Jenkins pipelines can run Docker CLI, Docker Compose and Buildx commands.
+
+This is convenient for a local CI/CD lab, but it is a high-trust configuration. A job with access to this socket can control the host Docker daemon, including creating privileged containers, mounting host paths, removing containers, and interacting with images, networks and volumes.
+
+Current lab policy:
+
+- Only trusted Jenkinsfiles should use the `docker` / `buildx` labels.
+- Do not run unreviewed pull request builds on `ci-arm64-docker`.
+- Keep general ALM/PLM API jobs on `ci-arm64-alm`, not on the Docker-capable agent.
+- Keep the Jenkins controller free of Docker socket access.
+- Treat credentials used on Docker-capable jobs as higher risk.
+
+Production-oriented alternatives:
+
+1. Remote BuildKit builder
+2. Dedicated isolated Docker build host
+3. Kubernetes dynamic agents with Kaniko / BuildKit / Buildah
+4. Rootless Podman / Buildah on a dedicated Linux build worker
+5. Docker Build Cloud or equivalent managed builder
+
+For this repository, docker.sock is acceptable for local learning, but it should not be copied directly into a production Jenkins architecture without additional isolation and governance.
+

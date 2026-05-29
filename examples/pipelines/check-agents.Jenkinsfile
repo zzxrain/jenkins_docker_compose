@@ -1,3 +1,5 @@
+// This pipeline must run only on the dedicated Docker-capable agent.
+// Do not use this label for untrusted pull request builds.
 pipeline {
     agent none
 

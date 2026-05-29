@@ -126,8 +126,12 @@ services:
     container_name: ci-arm64-docker
     volumes:
       - ci_arm64_docker_home:/home/jenkins/agent
-      # Security trade-off: mounting docker.sock gives this agent root-equivalent
-      # control of the host Docker daemon. Keep jobs on the `docker` label trusted.
+      # Security trade-off:
+      # Mounting docker.sock gives this agent root-equivalent control of the host Docker daemon.
+      # Only trusted, reviewed pipelines should run on labels such as `docker` or `buildx`.
+      # Do not run untrusted pull requests or arbitrary user-provided scripts on this agent.
+      # For enterprise production, prefer a remote BuildKit builder, Kubernetes-based build agents,
+      # rootless builders, or a dedicated isolated build host instead of the host Docker socket.
       - /var/run/docker.sock:/var/run/docker.sock
 
 networks:
