@@ -374,7 +374,7 @@ Caddy uses `tls internal` for local HTTPS simulation.
 This means Caddy generates a local CA and a certificate for:
 
 ```text
-jenkins.localhost
+apps.localmac.net
 ```
 
 Your browser may warn that the certificate is not trusted.
