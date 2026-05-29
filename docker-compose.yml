@@ -32,6 +32,16 @@ x-agent-common: &agent-common
     - /tmp
     - /var/run
 
+  # /run is tmpfs, so /run/sshd is empty on every container start.
+  # Create it before delegating to the original Jenkins ssh-agent setup script.
+  entrypoint:
+    - /bin/bash
+    - -lc
+    - |
+      mkdir -p /run/sshd
+      chmod 0755 /run/sshd
+      exec /usr/local/bin/setup-sshd
+
   healthcheck:
     # The Jenkins ssh-agent image starts sshd as the main service; pgrep is a lightweight readiness check.
     test: ["CMD-SHELL", "pgrep -x sshd >/dev/null"]

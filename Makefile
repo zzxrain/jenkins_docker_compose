@@ -83,12 +83,12 @@ rebuild-controller:
 
 # Rebuild base SSH agent from the remote Jenkins ssh-agent image.
 rebuild-agent-base:
-	$(COMPOSE) --progress=plain build --no-cache --pull --no-deps ci-arm64-general
+	$(COMPOSE) --progress=plain build --no-cache --pull ci-arm64-general
 
 # Rebuild Docker-capable agent from the locally built base agent image.
 # Important: no --pull here because FROM local/jenkins-ssh-agent-base:debian-jdk21 is local-only.
 rebuild-agent-docker:
-	$(COMPOSE) --progress=plain build --no-cache --no-deps ci-arm64-docker
+	$(COMPOSE) --progress=plain build --no-cache ci-arm64-docker
 
 rebuild-agents: rebuild-agent-base rebuild-agent-docker
 
