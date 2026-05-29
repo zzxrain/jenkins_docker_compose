@@ -1,6 +1,5 @@
 # Override COMPOSE when testing with an alternate Docker context or Compose wrapper.
-COMPOSE="${COMPOSE:-docker compose}"
-VOLUME_NAME="${JENKINS_HOME_VOLUME:-$(${COMPOSE} config --format json | jq -r '.volumes.jenkins_home.name // empty')}"
+COMPOSE ?= docker compose
 ENV_FILE ?= .env
 SECRETS_DIR ?= secrets
 AGENT_KEY ?= $(SECRETS_DIR)/jenkins_agent_key

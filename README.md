@@ -27,7 +27,7 @@ brew install jq
 
 ```bash
 make init
-# 编辑 .env：替换管理员密码，并把 make init 输出的公钥填入 JENKINS_AGENT_SSH_PUBKEY
+# 编辑 .env：至少替换 JENKINS_ADMIN_PASSWORD；必要时调整 JENKINS_URL / TZ
 make validate
 make up
 ```
