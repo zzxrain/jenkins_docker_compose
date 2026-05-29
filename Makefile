@@ -52,3 +52,24 @@ restore:
 
 clean:
 	$(COMPOSE) down --remove-orphans
+
+.PHONY: reset rebuild-controller verify
+
+reset:
+	$(COMPOSE) down -v --remove-orphans
+	-docker image rm local/jenkins-controller:2.555.2-lts-jdk21
+
+rebuild-controller:
+	$(COMPOSE) build --no-cache --pull --progress=plain jenkins-controller
+
+verify:
+	$(COMPOSE) exec jenkins-controller bash -lc '\
+	echo "==== ref plugins ===="; \
+	find /usr/share/jenkins/ref/plugins -maxdepth 1 -type f | sed "s#.*/##" | sort | grep -Ei "configuration-as-code|matrix-auth|ssh-slaves|credentials" || true; \
+	echo; \
+	echo "==== home plugins ===="; \
+	find /var/jenkins_home/plugins -maxdepth 1 -type f | sed "s#.*/##" | sort | grep -Ei "configuration-as-code|matrix-auth|ssh-slaves|credentials" || true; \
+	echo; \
+	echo "==== security ===="; \
+	grep -nE "useSecurity|securityRealm|authorizationStrategy" /var/jenkins_home/config.xml || true \
+	'
