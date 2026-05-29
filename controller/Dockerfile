@@ -12,5 +12,14 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 USER jenkins
+
 COPY plugins.txt /usr/share/jenkins/ref/plugins.txt
-RUN jenkins-plugin-cli -f /usr/share/jenkins/ref/plugins.txt
+
+RUN mkdir -p /usr/share/jenkins/ref/plugins \
+ && jenkins-plugin-cli \
+      --plugin-file /usr/share/jenkins/ref/plugins.txt \
+      --plugin-download-directory /usr/share/jenkins/ref/plugins \
+      --verbose \
+ && test -s /usr/share/jenkins/ref/plugins/configuration-as-code.jpi \
+ && test -s /usr/share/jenkins/ref/plugins/matrix-auth.jpi \
+ && test -s /usr/share/jenkins/ref/plugins/ssh-slaves.jpi
