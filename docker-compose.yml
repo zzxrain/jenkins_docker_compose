@@ -1,89 +1,151 @@
+# Shared runtime defaults keep service behavior consistent and reduce duplicated
+# Compose settings when more agents are added for enterprise-like simulations.
+x-jenkins-common: &jenkins-common
+  # Restart automatically after host reboots or transient container failures.
+  restart: unless-stopped
+  networks:
+    - jenkins
+  # Cap local JSON logs so a lab host does not run out of disk space.
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# All static SSH agents use the same network, healthcheck, public key injection,
+# and startup ordering so Jenkins only tries to connect after the controller is healthy.
+x-agent-common: &agent-common
+  <<: *jenkins-common
+  environment:
+    TZ: ${TZ:-Asia/Shanghai}
+    # Fail fast if the public key is missing instead of starting unreachable agents.
+    JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY:?Set JENKINS_AGENT_SSH_PUBKEY in .env}"
+  expose:
+    - "22"
+  healthcheck:
+    # The Jenkins ssh-agent image starts sshd as the main service; pgrep is a lightweight readiness check.
+    test: ["CMD-SHELL", "pgrep -x sshd >/dev/null"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+  depends_on:
+    jenkins-controller:
+      condition: service_healthy
+
 services:
   jenkins-controller:
+    <<: *jenkins-common
     build:
       context: ./controller
     image: local/jenkins-controller:2.555.2-lts-jdk21
     container_name: jenkins-controller
     ports:
+      # Bind the raw Jenkins HTTP port to loopback only; external access should go through Caddy/TLS.
       - "127.0.0.1:8089:8080"
     expose:
       - "8080"
     environment:
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
+      # JCasC makes the controller reproducible and avoids manual UI-only configuration drift.
       CASC_JENKINS_CONFIG: /var/jenkins_home/casc/jenkins.yaml
-      JENKINS_ADMIN_ID: "${JENKINS_ADMIN_ID}"
-      JENKINS_ADMIN_PASSWORD: "${JENKINS_ADMIN_PASSWORD}"
+      # Required variables make insecure or incomplete bootstrap attempts fail early.
+      JENKINS_ADMIN_ID: "${JENKINS_ADMIN_ID:?Set JENKINS_ADMIN_ID in .env}"
+      JENKINS_ADMIN_PASSWORD: "${JENKINS_ADMIN_PASSWORD:?Set JENKINS_ADMIN_PASSWORD in .env}"
+      JENKINS_URL: "${JENKINS_URL:-https://jenkins.localhost:8444/}"
       JAVA_OPTS: >-
         -Djenkins.install.runSetupWizard=false
-    networks:
-      - jenkins
+        -Djava.awt.headless=true
+      JENKINS_OPTS: >-
+        --httpListenAddress=0.0.0.0
+        --httpPort=8080
     volumes:
+      # Persist controller state in a named volume so containers can be rebuilt safely.
       - jenkins_home:/var/jenkins_home
+      # Mount JCasC read-only to prevent Jenkins or jobs from mutating source-controlled config.
       - ./casc:/var/jenkins_home/casc:ro
+    secrets:
+      # Keep the SSH private key out of environment variables and source-controlled files.
+      - jenkins_agent_key
+    healthcheck:
+      # /login is available before authentication and gives Compose a practical readiness signal.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/login >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
 
-    caddy:
-      image: caddy:2
-      container_name: jenkins-caddy
-      ports:
-        - "8444:443"
-        - "8088:80"
-      networks:
-      - jenkins
-      volumes:
-        - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-        - caddy_data:/data
-        - caddy_config:/config
-      depends_on:
-        - jenkins-controller
+  caddy:
+    <<: *jenkins-common
+    image: caddy:2
+    container_name: jenkins-caddy
+    ports:
+      # Caddy provides the TLS-facing entrypoint used to mimic an enterprise reverse proxy.
+      - "8444:443"
+      - "8088:80"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persist Caddy's local CA and runtime config to avoid regenerating certificates on every restart.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      jenkins-controller:
+        condition: service_healthy
+    healthcheck:
+      # This validates the proxy binary is present; upstream readiness is handled by depends_on.
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   ci-arm64-general:
+    <<: *agent-common
     build:
       context: ./agents/base
-    image: jenkins/ssh-agent:jdk21
+    image: local/jenkins-ssh-agent-base:debian-jdk21
     container_name: ci-arm64-general
-    environment:
-      TZ: Asia/Shanghai
-      JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY}"
-    networks:
-      - jenkins
     volumes:
+      # Keep workspaces across agent container rebuilds for faster local iteration.
       - ci_arm64_general_home:/home/jenkins/agent
 
   ci-arm64-alm:
+    <<: *agent-common
     build:
       context: ./agents/base
-    image: jenkins/ssh-agent:jdk21
+    image: local/jenkins-ssh-agent-base:debian-jdk21
     container_name: ci-arm64-alm
-    environment:
-      TZ: Asia/Shanghai
-      JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY}"
-    networks:
-      - jenkins
     volumes:
+      # Dedicated ALM/PLM workspace keeps Windchill/Codebeamer tooling separate from generic jobs.
       - ci_arm64_alm_home:/home/jenkins/agent
 
   ci-arm64-docker:
+    <<: *agent-common
     build:
       context: ./agents/docker
     image: local/jenkins-ssh-agent-docker:debian-jdk21
     container_name: ci-arm64-docker
-    environment:
-      TZ: Asia/Shanghai
-      JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY}"
-    networks:
-      - jenkins
     volumes:
       - ci_arm64_docker_home:/home/jenkins/agent
+      # Security trade-off: mounting docker.sock gives this agent root-equivalent
+      # control of the host Docker daemon. Keep jobs on the `docker` label trusted.
       - /var/run/docker.sock:/var/run/docker.sock
 
 networks:
   jenkins:
+    # A single private bridge keeps Jenkins internals reachable by service name without exposing agents to the host.
     driver: bridge
 
 volumes:
+  # Named volumes make backup/restore independent from container lifecycle.
   jenkins_home:
   ci_arm64_general_home:
   ci_arm64_alm_home:
   ci_arm64_docker_home:
   caddy_data:
   caddy_config:
+
+secrets:
+  jenkins_agent_key:
+    # The file is generated locally by `make init` and ignored by Git.
+    file: ./secrets/jenkins_agent_key

@@ -1,22 +1,44 @@
 jenkins:
   systemMessage: "Jenkins configured by JCasC for local Docker Compose CI environment."
 
+  # Keep the controller dedicated to orchestration; all builds should run on agents.
   numExecutors: 0
 
   mode: NORMAL
 
   securityRealm:
     local:
+      # Disable self-signup so identities are created intentionally during lab exercises.
       allowsSignup: false
       users:
         - id: "${JENKINS_ADMIN_ID}"
           password: "${JENKINS_ADMIN_PASSWORD}"
 
   authorizationStrategy:
-    loggedInUsersCanDoAnything:
-      allowAnonymousRead: false
+    globalMatrix:
+      entries:
+        # Grant full administration only to the configured bootstrap admin user.
+        - user:
+            name: "${JENKINS_ADMIN_ID}"
+            permissions:
+              - "Overall/Administer"
+        # Authenticated users get read-only access by default; grant job/folder rights explicitly later.
+        - group:
+            name: "authenticated"
+            permissions:
+              - "Overall/Read"
+
+  # Enable remoting security to reduce the attack surface of inbound/agent communication.
+  remotingSecurity:
+    enabled: true
+
+  crumbIssuer:
+    standard:
+      # Excluding the client IP avoids CSRF crumb mismatches behind reverse proxies or NAT.
+      excludeClientIPFromCrumb: true
 
   nodes:
+    # Generic Linux agent for ordinary CI tasks that do not need ALM tooling or Docker socket access.
     - permanent:
         name: "ci-arm64-general"
         nodeDescription: "General-purpose ARM64 Linux SSH agent for normal CI tasks."
@@ -34,8 +56,10 @@ jenkins:
             maxNumRetries: 3
             retryWaitTime: 15
             sshHostKeyVerificationStrategy:
+              # Convenient for disposable Docker agents; pin host keys before using this pattern in production.
               nonVerifyingKeyVerificationStrategy: {}
 
+    # ALM/PLM agent isolates Windchill and Codebeamer integration scripts, SDKs, and credentials by label.
     - permanent:
         name: "ci-arm64-alm"
         nodeDescription: "ARM64 Linux SSH agent for ALM/PLM automation tasks such as Codebeamer and Windchill API integration."
@@ -53,8 +77,10 @@ jenkins:
             maxNumRetries: 3
             retryWaitTime: 15
             sshHostKeyVerificationStrategy:
+              # Convenient for disposable Docker agents; pin host keys before using this pattern in production.
               nonVerifyingKeyVerificationStrategy: {}
 
+    # Docker-capable agent is separated because Docker socket access is a high-trust capability.
     - permanent:
         name: "ci-arm64-docker"
         nodeDescription: "ARM64 Linux SSH agent with Docker CLI, Docker Compose plugin and Buildx support."
@@ -72,6 +98,7 @@ jenkins:
             maxNumRetries: 3
             retryWaitTime: 15
             sshHostKeyVerificationStrategy:
+              # Convenient for disposable Docker agents; pin host keys before using this pattern in production.
               nonVerifyingKeyVerificationStrategy: {}
 
 credentials:
@@ -85,8 +112,10 @@ credentials:
               description: "SSH private key for static Docker SSH agents"
               privateKeySource:
                 directEntry:
+                  # Read the key from a Docker secret so it is not stored in JCasC or environment variables.
                   privateKey: "${readFile:/run/secrets/jenkins_agent_key}"
 
 unclassified:
   location:
-    url: "https://apps.locamac.net:8444/"
+    # External URL is environment-driven so local TLS, DNS aliases, or enterprise proxies can reuse the same JCasC.
+    url: "${JENKINS_URL}"
