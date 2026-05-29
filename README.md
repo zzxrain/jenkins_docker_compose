@@ -10,6 +10,19 @@
 - **JCasC**：通过 `casc/jenkins.yaml` 固化 Jenkins 基础配置，降低手工配置漂移。
 - **Docker named volumes**：持久化 Jenkins Home、agent workspace、Caddy 数据。
 
+## Prerequisites
+
+- macOS with Docker Desktop or OrbStack
+- Docker Compose v2
+- GNU Make
+- OpenSSH tools: `ssh-keygen`
+- jq
+
+macOS 安装 jq：
+```bash
+brew install jq
+```
+
 ## 快速开始
 
 ```bash
@@ -17,6 +30,13 @@ make init
 # 编辑 .env：替换管理员密码，并把 make init 输出的公钥填入 JENKINS_AGENT_SSH_PUBKEY
 make validate
 make up
+```
+
+## Post-start verification
+
+```bash
+make ps
+make logs
 ```
 
 访问：<https://jenkins.localhost:8444/> 或本机映射端口 <http://127.0.0.1:8089/>。
@@ -71,8 +91,26 @@ make restore ARCHIVE=backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
 - 插件版本固定在 `controller/plugins.txt`，便于回滚与差异审查。
 - 建议在真实企业环境中定期导出 Jenkins 配置、凭据元数据清单和 job DSL / pipeline 定义。
 
+Upgrade
+```bash
+make backup
+# 修改 Jenkins 版本 / plugins.txt
+make build
+make up
+make logs
+```
+
+Rollback
+```bash
+make down
+# 恢复旧版本 Dockerfile / plugins.txt
+make restore ARCHIVE=backup/output/xxx.tar.gz
+make up
+```
+
 ## 已知取舍
 
 - SSH agent host key verification 当前使用 non-verifying 策略，便于本地容器重建；企业环境应改为固定 host key 或可信 CA。
 - Docker socket agent 便于学习 Docker-in-Docker 替代方案，但安全边界弱；生产环境建议改造。
 - 该仓库默认面向单机学习环境，不替代高可用 Jenkins controller 架构。
+

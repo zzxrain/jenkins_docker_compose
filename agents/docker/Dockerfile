@@ -1,4 +1,4 @@
-FROM jenkins/ssh-agent:debian-jdk21
+FROM local/jenkins-ssh-agent-base:debian-jdk21
 
 USER root
 
