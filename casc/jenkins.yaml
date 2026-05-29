@@ -17,16 +17,13 @@ jenkins:
   authorizationStrategy:
     globalMatrix:
       entries:
-        # Grant full administration only to the configured bootstrap admin user.
+        # Strict bootstrap model:
+        # Only the configured bootstrap administrator has global admin permission.
+        # Do not grant permissions to broad groups such as authenticated or anonymous.
         - user:
             name: "${JENKINS_ADMIN_ID}"
             permissions:
               - "Overall/Administer"
-        # Authenticated users get read-only access by default; grant job/folder rights explicitly later.
-        - group:
-            name: "authenticated"
-            permissions:
-              - "Overall/Read"
 
   # Enable remoting security to reduce the attack surface of inbound/agent communication.
   remotingSecurity:
