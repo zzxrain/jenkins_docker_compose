@@ -56,6 +56,11 @@ jenkins:
             maxNumRetries: 3
             retryWaitTime: 15
             sshHostKeyVerificationStrategy:
+              # Production-like SSH host key verification:
+              # Jenkins will not blindly trust this SSH agent on the first connection.
+              # An administrator must approve the presented SSH host key in the Jenkins UI.
+              # If the agent container is recreated and its host key changes, Jenkins will block
+              # the connection again until the new key is explicitly reviewed and trusted.
               manuallyTrustedKeyVerificationStrategy:
                 requireInitialManualTrust: true
 
@@ -77,6 +82,11 @@ jenkins:
             maxNumRetries: 3
             retryWaitTime: 15
             sshHostKeyVerificationStrategy:
+              # Production-like SSH host key verification:
+              # Jenkins will not blindly trust this SSH agent on the first connection.
+              # An administrator must approve the presented SSH host key in the Jenkins UI.
+              # If the agent container is recreated and its host key changes, Jenkins will block
+              # the connection again until the new key is explicitly reviewed and trusted.
               manuallyTrustedKeyVerificationStrategy:
                 requireInitialManualTrust: true
 
@@ -98,6 +108,10 @@ jenkins:
             maxNumRetries: 3
             retryWaitTime: 15
             sshHostKeyVerificationStrategy:
+              # Production-like SSH host key verification:
+              # This Docker-capable agent has elevated risk because it mounts /var/run/docker.sock.
+              # Jenkins must not silently trust a new or changed SSH host key for this agent.
+              # An administrator must approve the presented host key before the controller connects.
               manuallyTrustedKeyVerificationStrategy:
                 requireInitialManualTrust: true
 

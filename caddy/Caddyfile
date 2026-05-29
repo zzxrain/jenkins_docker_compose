@@ -1,4 +1,9 @@
+# Local TLS endpoint for Jenkins.
+# The host port is mapped as 8444:443 in docker-compose.yml, so Jenkins must see
+# X-Forwarded-Port as 8444 to generate correct absolute URLs and avoid reverse proxy warnings.
 jenkins.localhost:443 {
+    # Use Caddy's internal CA for local HTTPS simulation.
+    # The generated root CA may need to be trusted manually on macOS.
     tls internal
 
     reverse_proxy jenkins-controller:8080 {

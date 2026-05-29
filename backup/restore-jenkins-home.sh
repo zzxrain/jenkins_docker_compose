@@ -4,7 +4,8 @@ set -euo pipefail
 # Restore requires an explicit archive argument to avoid accidentally replaying the wrong backup.
 ARCHIVE="${1:-}"
 # Resolve the actual Compose volume name so project-name changes do not break restores.
-VOLUME_NAME="${JENKINS_HOME_VOLUME:-$(docker compose config --format json | jq -r '.volumes.jenkins_home.name // empty')}"
+COMPOSE="${COMPOSE:-docker compose}"
+VOLUME_NAME="${JENKINS_HOME_VOLUME:-$(${COMPOSE} config --format json | jq -r '.volumes.jenkins_home.name // empty')}"
 
 if [[ -z "${ARCHIVE}" || ! -f "${ARCHIVE}" ]]; then
   echo "Usage: CONFIRM_RESTORE=RESTORE $0 backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz" >&2

@@ -43,12 +43,12 @@ ps:
 	$(COMPOSE) ps
 
 backup:
-	./backup/backup-jenkins-home.sh
+	COMPOSE="$(COMPOSE)" ./backup/backup-jenkins-home.sh
 
 restore:
 	@test -n "$(ARCHIVE)" || (echo "Usage: make restore ARCHIVE=backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz" && exit 2)
 	$(COMPOSE) down
-	CONFIRM_RESTORE=RESTORE ./backup/restore-jenkins-home.sh "$(ARCHIVE)"
+	COMPOSE="$(COMPOSE)" CONFIRM_RESTORE=RESTORE ./backup/restore-jenkins-home.sh "$(ARCHIVE)"
 
 clean:
 	$(COMPOSE) down --remove-orphans

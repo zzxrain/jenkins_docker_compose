@@ -5,7 +5,8 @@ set -euo pipefail
 BACKUP_DIR="${BACKUP_DIR:-./backup/output}"
 TS="$(date +%Y%m%d-%H%M%S)"
 # Resolve the actual Compose volume name so project-name changes do not break backups.
-VOLUME_NAME="${JENKINS_HOME_VOLUME:-$(docker compose config --format json | jq -r '.volumes.jenkins_home.name // empty')}"
+COMPOSE="${COMPOSE:-docker compose}"
+VOLUME_NAME="${JENKINS_HOME_VOLUME:-$(${COMPOSE} config --format json | jq -r '.volumes.jenkins_home.name // empty')}"
 
 if [[ -z "${VOLUME_NAME}" ]]; then
   echo "Unable to determine Jenkins home volume name. Set JENKINS_HOME_VOLUME manually." >&2

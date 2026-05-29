@@ -32,6 +32,24 @@ make validate
 make up
 ```
 
+## First-time SSH Agent Trust
+
+Because this lab uses `manuallyTrustedKeyVerificationStrategy`, Jenkins will require an administrator to trust each SSH agent host key on first connection.
+
+After `make up`:
+
+1. Open <https://jenkins.localhost:8444/>
+2. Log in with `JENKINS_ADMIN_ID` / `JENKINS_ADMIN_PASSWORD`
+3. Go to **Manage Jenkins → Nodes**
+4. Open each offline SSH agent:
+   - `ci-arm64-general`
+   - `ci-arm64-alm`
+   - `ci-arm64-docker`
+5. Review and approve the presented SSH host key
+6. Wait until the agent becomes online
+
+If an agent container is recreated and its SSH host key changes, Jenkins may require approval again. This is expected for a production-like trust model.
+
 ## Post-start verification
 
 ```bash
@@ -110,7 +128,10 @@ make up
 
 ## 已知取舍
 
-- SSH agent host key verification 当前使用 non-verifying 策略，便于本地容器重建；企业环境应改为固定 host key 或可信 CA。
-- Docker socket agent 便于学习 Docker-in-Docker 替代方案，但安全边界弱；生产环境建议改造。
-- 该仓库默认面向单机学习环境，不替代高可用 Jenkins controller 架构。
+- SSH agent host key verification 当前使用 `manuallyTrustedKeyVerificationStrategy`：
+  Jenkins 首次连接每个 SSH Agent 时，需要管理员在 Jenkins UI 中手工信任该 Agent 的 SSH host key。
+  这比 `nonVerifyingKeyVerificationStrategy` 更贴近企业安全模型，但仍不是最严格的生产方案。
+  更严格的企业方案可以升级为 `knownHostsFileKeyVerificationStrategy`，并将 Agent SSH host key 固化到受控的 `known_hosts` 文件中。
+- `ci-arm64-docker` 挂载 `/var/run/docker.sock`，便于学习 Docker 构建，但安全边界弱；生产环境建议改造为远程 BuildKit、rootless builder、Kubernetes agent 或独立构建集群。
+- 该仓库默认面向单机学习和企业架构模拟，不替代高可用 Jenkins Controller 架构。
 
