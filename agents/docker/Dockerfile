@@ -1,9 +1,19 @@
-FROM local/jenkins-ssh-agent-base:debian-jdk21
+FROM jenkins/ssh-agent:debian-jdk21
 
 USER root
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      git \
+      zip \
+      unzip \
+      jq \
+      bash \
+      procps \
+      iputils-ping \
+      netcat-openbsd \
       gnupg \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
