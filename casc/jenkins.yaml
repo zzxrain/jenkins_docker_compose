@@ -56,8 +56,8 @@ jenkins:
             maxNumRetries: 3
             retryWaitTime: 15
             sshHostKeyVerificationStrategy:
-              # Convenient for disposable Docker agents; pin host keys before using this pattern in production.
-              nonVerifyingKeyVerificationStrategy: {}
+              manuallyTrustedKeyVerificationStrategy:
+                requireInitialManualTrust: true
 
     # ALM/PLM agent isolates Windchill and Codebeamer integration scripts, SDKs, and credentials by label.
     - permanent:
@@ -77,8 +77,8 @@ jenkins:
             maxNumRetries: 3
             retryWaitTime: 15
             sshHostKeyVerificationStrategy:
-              # Convenient for disposable Docker agents; pin host keys before using this pattern in production.
-              nonVerifyingKeyVerificationStrategy: {}
+              manuallyTrustedKeyVerificationStrategy:
+                requireInitialManualTrust: true
 
     # Docker-capable agent is separated because Docker socket access is a high-trust capability.
     - permanent:
@@ -98,8 +98,8 @@ jenkins:
             maxNumRetries: 3
             retryWaitTime: 15
             sshHostKeyVerificationStrategy:
-              # Convenient for disposable Docker agents; pin host keys before using this pattern in production.
-              nonVerifyingKeyVerificationStrategy: {}
+              manuallyTrustedKeyVerificationStrategy:
+                requireInitialManualTrust: true
 
 credentials:
   system:
