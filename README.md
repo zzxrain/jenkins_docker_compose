@@ -21,7 +21,7 @@ This repository is intended for a local lab or production-like architecture simu
 ```text
 Browser
   |
-  | HTTPS: https://jenkins.localhost:8444/
+  | HTTPS: https://apps.localmac.net:8444/
   v
 Caddy Reverse Proxy
   |
@@ -150,7 +150,7 @@ The `ssh-keygen -h` command may start key generation on some systems. Press `Ctr
 Primary access URL:
 
 ```text
-https://jenkins.localhost:8444/
+https://apps.localmac.net:8444/
 ```
 
 Local troubleshooting URL:
@@ -244,7 +244,7 @@ A typical `.env` should look like this:
 
 ```env
 TZ=Asia/Shanghai
-JENKINS_URL=https://jenkins.localhost:8444/
+JENKINS_URL=https://apps.localmac.net:8444/
 JENKINS_ADMIN_ID=admin
 JENKINS_ADMIN_PASSWORD=change-me-please
 
@@ -268,7 +268,7 @@ JENKINS_ADMIN_PASSWORD=your-strong-local-password
 Keep this URL for the default local HTTPS setup:
 
 ```env
-JENKINS_URL=https://jenkins.localhost:8444/
+JENKINS_URL=https://apps.localmac.net:8444/
 ```
 
 ---
@@ -349,7 +349,7 @@ ci-arm64-docker
 Open:
 
 ```text
-https://jenkins.localhost:8444/
+https://apps.localmac.net:8444/
 ```
 
 Log in with the values from `.env`:
@@ -417,7 +417,7 @@ sudo security add-trusted-cert \
 Then restart your browser and open:
 
 ```text
-https://jenkins.localhost:8444/
+https://apps.localmac.net:8444/
 ```
 
 ---
@@ -430,7 +430,7 @@ That means Jenkins will not blindly trust SSH agents on the first connection. An
 
 After `make up`:
 
-1. Open `https://jenkins.localhost:8444/`
+1. Open `https://apps.localmac.net:8444/`
 2. Log in as the Jenkins administrator.
 3. Go to **Manage Jenkins → Nodes**.
 4. Open each SSH agent:
@@ -1334,5 +1334,5 @@ make restore ARCHIVE=backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
 Primary access URL:
 
 ```text
-https://jenkins.localhost:8444/
+https://apps.localmac.net:8444/
 ```
