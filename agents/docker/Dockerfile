@@ -27,4 +27,4 @@ RUN apt-get update \
       docker-compose-plugin \
  && rm -rf /var/lib/apt/lists/*
 
-USER jenkins
+USER root

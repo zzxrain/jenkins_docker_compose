@@ -16,4 +16,4 @@ RUN apt-get update \
       netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
 
-USER jenkins
+USER root
