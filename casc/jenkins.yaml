@@ -29,11 +29,6 @@ jenkins:
   remotingSecurity:
     enabled: true
 
-  crumbIssuer:
-    standard:
-      # Excluding the client IP avoids CSRF crumb mismatches behind reverse proxies or NAT.
-      excludeClientIPFromCrumb: true
-
   nodes:
     # Generic Linux agent for ordinary CI tasks that do not need ALM tooling or Docker socket access.
     - permanent:

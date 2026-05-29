@@ -60,7 +60,7 @@ reset:
 	-docker image rm local/jenkins-controller:2.555.2-lts-jdk21
 
 rebuild-controller:
-	$(COMPOSE) build --no-cache --pull --progress=plain jenkins-controller
+	$(COMPOSE) --progress=plain build --no-cache --pull jenkins-controller
 
 verify:
 	$(COMPOSE) exec jenkins-controller bash -lc '\
