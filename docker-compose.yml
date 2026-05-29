@@ -82,7 +82,6 @@ services:
     ports:
       # Caddy provides the TLS-facing entrypoint used to mimic an enterprise reverse proxy.
       - "8444:443"
-      - "8088:80"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # Persist Caddy's local CA and runtime config to avoid regenerating certificates on every restart.

@@ -20,10 +20,12 @@ validate:
 	$(COMPOSE) config --quiet
 
 build:
-	$(COMPOSE) build
+	$(COMPOSE) build jenkins-controller
+	$(COMPOSE) build ci-arm64-general ci-arm64-alm
+	$(COMPOSE) build ci-arm64-docker
 
-up:
-	$(COMPOSE) up -d --build
+up: build
+	$(COMPOSE) up -d
 
 down:
 	$(COMPOSE) down
@@ -38,8 +40,8 @@ backup:
 	./backup/backup-jenkins-home.sh
 
 restore:
-	# Require an explicit archive path so restore operations are intentional and auditable.
 	@test -n "$(ARCHIVE)" || (echo "Usage: make restore ARCHIVE=backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz" && exit 2)
+	$(COMPOSE) down
 	CONFIRM_RESTORE=RESTORE ./backup/restore-jenkins-home.sh "$(ARCHIVE)"
 
 clean:
