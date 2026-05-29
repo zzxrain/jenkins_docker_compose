@@ -22,6 +22,16 @@ x-agent-common: &agent-common
     JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY:?Set JENKINS_AGENT_SSH_PUBKEY in .env}"
   expose:
     - "22"
+
+  # The Jenkins ssh-agent base image declares several runtime VOLUME paths.
+  # Without explicit overrides, Docker creates anonymous hash-named volumes for them.
+  # These paths are runtime-only and do not need persistence in this local lab.
+  tmpfs:
+    - /home/jenkins/.jenkins
+    - /run
+    - /tmp
+    - /var/run
+
   healthcheck:
     # The Jenkins ssh-agent image starts sshd as the main service; pgrep is a lightweight readiness check.
     test: ["CMD-SHELL", "pgrep -x sshd >/dev/null"]
@@ -125,6 +135,11 @@ services:
       context: ./agents/docker
     image: local/jenkins-ssh-agent-docker:debian-jdk21
     container_name: ci-arm64-docker
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY:?Set JENKINS_AGENT_SSH_PUBKEY in .env}"
+      # Docker socket is mounted outside /var/run so /var/run can be tmpfs without nested mount ambiguity.
+      DOCKER_HOST: "unix:///docker.sock"
     volumes:
       - ci_arm64_docker_home:/home/jenkins/agent
       # Security trade-off:
@@ -133,7 +148,7 @@ services:
       # Do not run untrusted pull requests or arbitrary user-provided scripts on this agent.
       # For enterprise production, prefer a remote BuildKit builder, Kubernetes-based build agents,
       # rootless builders, or a dedicated isolated build host instead of the host Docker socket.
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/docker.sock
 
 networks:
   jenkins:
@@ -141,13 +156,35 @@ networks:
     driver: bridge
 
 volumes:
-  # Named volumes make backup/restore independent from container lifecycle.
   jenkins_home:
+    labels:
+      app: jenkins-compose
+      component: controller-home
+
   ci_arm64_general_home:
+    labels:
+      app: jenkins-compose
+      component: agent-workspace
+
   ci_arm64_alm_home:
+    labels:
+      app: jenkins-compose
+      component: agent-workspace
+
   ci_arm64_docker_home:
+    labels:
+      app: jenkins-compose
+      component: agent-workspace
+
   caddy_data:
+    labels:
+      app: jenkins-compose
+      component: caddy-data
+
   caddy_config:
+    labels:
+      app: jenkins-compose
+      component: caddy-config
 
 secrets:
   jenkins_agent_key:

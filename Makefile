@@ -73,3 +73,26 @@ verify:
 	echo "==== security ===="; \
 	grep -nE "useSecurity|securityRealm|authorizationStrategy" /var/jenkins_home/config.xml || true \
 	'
+
+.PHONY: rebuild-agents verify-volumes
+
+rebuild-agents:
+	$(COMPOSE) --progress=plain build --no-cache --pull ci-arm64-general ci-arm64-alm ci-arm64-docker
+
+verify-volumes:
+	$(COMPOSE) ps -a
+	@echo
+	@echo "==== volume mounts ===="
+	@docker ps -a \
+	  --filter name=jenkins-controller \
+	  --filter name=jenkins-caddy \
+	  --filter name=ci-arm64 \
+	  --format '{{.Names}}' \
+	| xargs docker inspect \
+	| jq -r '\
+	  .[] | \
+	  .Name as $$container | \
+	  .Config.Image as $$image | \
+	  .Mounts[]? | \
+	  [$$container, $$image, .Type, (.Name // "-"), .Destination] | @tsv \
+	' | column -t

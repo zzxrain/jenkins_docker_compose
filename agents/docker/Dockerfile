@@ -27,4 +27,5 @@ RUN apt-get update \
       docker-compose-plugin \
  && rm -rf /var/lib/apt/lists/*
 
+# Keep root as the container runtime user so the ssh-agent entrypoint can initialize sshd correctly.
 USER root
