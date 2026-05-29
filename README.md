@@ -515,6 +515,22 @@ Expected labels:
 
 ---
 
+## Security Smoke Test
+
+After the first startup, verify that anonymous users cannot access administrative endpoints.
+
+Run these commands without browser cookies or Jenkins credentials:
+
+```bash
+curl -k -s https://apps.localmac.net:8444/whoAmI/api/json | jq
+
+curl -k -s -i https://apps.localmac.net:8444/script | head -n 80
+
+curl -k -s -i https://apps.localmac.net:8444/configure | head -n 80
+
+curl -k -s -i https://apps.localmac.net:8444/credentials/ | head -n 80
+```
+
 ## Recommended Test Pipeline
 
 Create a temporary Jenkins Pipeline job to validate the agents.

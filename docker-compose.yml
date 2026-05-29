@@ -80,8 +80,9 @@ services:
     image: caddy:2
     container_name: jenkins-caddy
     ports:
-      # Caddy provides the TLS-facing entrypoint used to mimic an enterprise reverse proxy.
-      - "8444:443"
+      # Bind local HTTPS to loopback only for this local lab.
+      # Remove 127.0.0.1 only when you intentionally want LAN access.
+      - "127.0.0.1:8444:443"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # Persist Caddy's local CA and runtime config to avoid regenerating certificates on every restart.
