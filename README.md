@@ -1,161 +1,1338 @@
 # Jenkins Docker Compose CI/CD Lab
 
-这是一个用于学习 CI/CD、模拟企业 Jenkins 架构，并为后续 Windchill / Codebeamer 集成做准备的本地 Docker Compose 环境。
+This repository provides a local Jenkins CI/CD lab based on Docker Compose. It is designed for learning CI/CD, simulating an enterprise-like Jenkins architecture, and preparing future integrations with PTC Windchill PLM and PTC Codebeamer ALM.
 
-## 架构概览
+The stack includes:
 
-- **Jenkins Controller**：只负责调度、配置和凭据管理，不执行构建任务（`numExecutors: 0`）。
-- **Caddy 反向代理**：提供本地 HTTPS 入口，便于模拟企业网关 / 统一入口。
-- **静态 SSH Agents**：按职责拆分为通用、ALM/PLM、Docker 构建三类节点，便于后续按 label 隔离流水线。
-- **JCasC**：通过 `casc/jenkins.yaml` 固化 Jenkins 基础配置，降低手工配置漂移。
-- **Docker named volumes**：持久化 Jenkins Home、agent workspace、Caddy 数据。
+* A Jenkins Controller
+* Static SSH-based Jenkins agents
+* A dedicated Docker-capable build agent
+* Caddy as a local HTTPS reverse proxy
+* Jenkins Configuration as Code
+* Docker named volumes for persistent data
+* Backup and restore scripts for Jenkins Home
+
+This repository is intended for a local lab or production-like architecture simulation. It is not a drop-in production Jenkins HA architecture.
+
+---
+
+## Architecture
+
+```text
+Browser
+  |
+  | HTTPS: https://jenkins.localhost:8444/
+  v
+Caddy Reverse Proxy
+  |
+  | HTTP: jenkins-controller:8080
+  v
+Jenkins Controller
+  |
+  | SSH
+  +--> ci-arm64-general
+  |
+  | SSH
+  +--> ci-arm64-alm
+  |
+  | SSH
+  +--> ci-arm64-docker
+          |
+          +--> /var/run/docker.sock
+```
+
+### Main components
+
+| Component            | Purpose                                                                                                              |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `jenkins-controller` | Jenkins Controller. It manages configuration, credentials, scheduling and orchestration. It does not run build jobs. |
+| `jenkins-caddy`      | Local HTTPS reverse proxy for Jenkins.                                                                               |
+| `ci-arm64-general`   | General-purpose SSH agent for normal CI tasks.                                                                       |
+| `ci-arm64-alm`       | Dedicated SSH agent for ALM/PLM automation tasks such as Windchill and Codebeamer integration.                       |
+| `ci-arm64-docker`    | Dedicated SSH agent with Docker CLI, Docker Compose plugin and Buildx support.                                       |
+| `jenkins_home`       | Docker named volume for Jenkins Controller state.                                                                    |
+| `caddy_data`         | Docker named volume for Caddy local CA and runtime data.                                                             |
+
+---
+
+## Design Goals
+
+This project is intentionally structured to be more enterprise-like than a single all-in-one Jenkins container.
+
+Key design decisions:
+
+* The Jenkins Controller has `numExecutors: 0`.
+* Builds must run on agents, not on the controller.
+* Agents are separated by responsibility.
+* Docker build capability is isolated to a dedicated high-trust agent.
+* Jenkins baseline configuration is managed through JCasC.
+* Jenkins raw HTTP port is bound to `127.0.0.1` only.
+* External browser access should go through Caddy HTTPS.
+* Jenkins agent SSH private key is passed through Docker secrets, not environment variables.
+* SSH host key verification uses a production-like manual trust model.
+* Jenkins Home can be backed up and restored through scripts.
+
+---
+
+## Repository Layout
+
+```text
+jenkins_docker_compose/
+├─ .env.example
+├─ .gitignore
+├─ Makefile
+├─ README.md
+├─ docker-compose.yml
+├─ controller/
+│  ├─ Dockerfile
+│  └─ plugins.txt
+├─ agents/
+│  ├─ base/
+│  │  └─ Dockerfile
+│  └─ docker/
+│     └─ Dockerfile
+├─ casc/
+│  └─ jenkins.yaml
+├─ caddy/
+│  └─ Caddyfile
+├─ backup/
+│  ├─ backup-jenkins-home.sh
+│  └─ restore-jenkins-home.sh
+└─ secrets/
+   └─ .gitkeep
+```
+
+The `secrets/jenkins_agent_key` file is generated locally by `make init` and must never be committed.
+
+---
 
 ## Prerequisites
 
-- macOS with Docker Desktop or OrbStack
-- Docker Compose v2
-- GNU Make
-- OpenSSH tools: `ssh-keygen`
-- jq
+The following prerequisites are expected on the host machine.
 
-macOS 安装 jq：
+### Required tools
+
+* macOS with Docker Desktop or OrbStack
+* Docker Compose v2
+* GNU Make
+* OpenSSH tools, including `ssh-keygen`
+* `jq`
+
+### Recommended macOS setup
+
+Install `jq` with Homebrew:
+
 ```bash
 brew install jq
 ```
 
-## 快速开始
+Check basic tools:
+
+```bash
+docker version
+docker compose version
+make --version
+ssh-keygen -h
+jq --version
+```
+
+The `ssh-keygen -h` command may start key generation on some systems. Press `Ctrl+C` if that happens. It is only a quick availability check.
+
+---
+
+## Ports
+
+| Host Port | Container                 | Purpose                                                  |
+| --------: | ------------------------- | -------------------------------------------------------- |
+|    `8444` | `jenkins-caddy:443`       | Main HTTPS access point                                  |
+|    `8089` | `jenkins-controller:8080` | Local-only raw Jenkins HTTP access, bound to `127.0.0.1` |
+
+Primary access URL:
+
+```text
+https://jenkins.localhost:8444/
+```
+
+Local troubleshooting URL:
+
+```text
+http://127.0.0.1:8089/
+```
+
+The raw Jenkins HTTP endpoint is bound to loopback only. External access should go through Caddy.
+
+---
+
+## First-Time Deployment
+
+Follow this section step by step for the initial deployment.
+
+### 1. Clone the repository
+
+```bash
+cd ~/Documents/Technology/DevOps
+git clone https://github.com/zzxrain/jenkins_docker_compose.git
+cd jenkins_docker_compose
+```
+
+Check the repository files:
+
+```bash
+ls -la
+```
+
+Expected important files:
+
+```text
+docker-compose.yml
+Makefile
+.env.example
+controller/
+agents/
+casc/
+caddy/
+backup/
+secrets/
+```
+
+---
+
+### 2. Initialize local configuration and SSH key
+
+Run:
 
 ```bash
 make init
-# 编辑 .env：至少替换 JENKINS_ADMIN_PASSWORD；必要时调整 JENKINS_URL / TZ
+```
+
+This command does the following:
+
+* Creates `.env` from `.env.example` if `.env` does not already exist.
+* Creates the `secrets/` directory if needed.
+* Generates `secrets/jenkins_agent_key`.
+* Generates `secrets/jenkins_agent_key.pub`.
+* Updates `JENKINS_AGENT_SSH_PUBKEY` in `.env` if it still contains the placeholder value.
+* Sets the private key permission to `600`.
+
+Check generated files:
+
+```bash
+ls -la .env secrets/
+```
+
+Expected:
+
+```text
+.env
+secrets/jenkins_agent_key
+secrets/jenkins_agent_key.pub
+```
+
+Do not commit `.env` or `secrets/jenkins_agent_key`.
+
+---
+
+### 3. Edit `.env`
+
+Open `.env`:
+
+```bash
+vim .env
+```
+
+A typical `.env` should look like this:
+
+```env
+TZ=Asia/Shanghai
+JENKINS_URL=https://jenkins.localhost:8444/
+JENKINS_ADMIN_ID=admin
+JENKINS_ADMIN_PASSWORD=change-me-please
+
+JENKINS_AGENT_SSH_PUBKEY=ssh-ed25519 ... jenkins-agent
+```
+
+Change at least:
+
+```env
+JENKINS_ADMIN_PASSWORD=change-me-please
+```
+
+Use a stronger password.
+
+Example:
+
+```env
+JENKINS_ADMIN_PASSWORD=your-strong-local-password
+```
+
+Keep this URL for the default local HTTPS setup:
+
+```env
+JENKINS_URL=https://jenkins.localhost:8444/
+```
+
+---
+
+### 4. Validate Docker Compose configuration
+
+Run:
+
+```bash
 make validate
+```
+
+This validates the Compose file after environment variable interpolation.
+
+If validation fails, check:
+
+```bash
+cat .env
+ls -la secrets/
+docker compose config
+```
+
+Common causes:
+
+* `.env` does not exist.
+* `JENKINS_ADMIN_ID` is missing.
+* `JENKINS_ADMIN_PASSWORD` is missing.
+* `JENKINS_AGENT_SSH_PUBKEY` is missing.
+* `secrets/jenkins_agent_key` does not exist.
+
+Run `make init` again if local files are missing.
+
+---
+
+### 5. Build and start the stack
+
+Run:
+
+```bash
 make up
 ```
 
-## First-time SSH Agent Trust
+This command will:
 
-Because this lab uses `manuallyTrustedKeyVerificationStrategy`, Jenkins will require an administrator to trust each SSH agent host key on first connection.
+* Build the Jenkins Controller image.
+* Build the base SSH agent image.
+* Build the Docker-capable SSH agent image.
+* Start Jenkins Controller.
+* Start Caddy.
+* Start all static SSH agents.
 
-After `make up`:
+Watch the logs:
 
-1. Open <https://jenkins.localhost:8444/>
-2. Log in with `JENKINS_ADMIN_ID` / `JENKINS_ADMIN_PASSWORD`
-3. Go to **Manage Jenkins → Nodes**
-4. Open each offline SSH agent:
-   - `ci-arm64-general`
-   - `ci-arm64-alm`
-   - `ci-arm64-docker`
-5. Review and approve the presented SSH host key
-6. Wait until the agent becomes online
+```bash
+make logs
+```
 
-If an agent container is recreated and its SSH host key changes, Jenkins may require approval again. This is expected for a production-like trust model.
-
-## Post-start verification
+You can also check container status:
 
 ```bash
 make ps
+```
+
+Expected services:
+
+```text
+jenkins-controller
+jenkins-caddy
+ci-arm64-general
+ci-arm64-alm
+ci-arm64-docker
+```
+
+---
+
+### 6. Access Jenkins
+
+Open:
+
+```text
+https://jenkins.localhost:8444/
+```
+
+Log in with the values from `.env`:
+
+```text
+JENKINS_ADMIN_ID
+JENKINS_ADMIN_PASSWORD
+```
+
+For troubleshooting only, you can also access:
+
+```text
+http://127.0.0.1:8089/
+```
+
+---
+
+## Local HTTPS and Caddy CA Trust
+
+Caddy uses `tls internal` for local HTTPS simulation.
+
+This means Caddy generates a local CA and a certificate for:
+
+```text
+jenkins.localhost
+```
+
+Your browser may warn that the certificate is not trusted.
+
+For a local lab, you can either:
+
+* Proceed through the browser warning, or
+* Trust Caddy's local root CA in macOS Keychain.
+
+To locate the Caddy local root certificate:
+
+```bash
+docker exec -it jenkins-caddy sh
+find /data -name root.crt -o -name "*.crt"
+exit
+```
+
+A typical path is:
+
+```text
+/data/caddy/pki/authorities/local/root.crt
+```
+
+Copy it to the repository:
+
+```bash
+docker cp jenkins-caddy:/data/caddy/pki/authorities/local/root.crt ./caddy/caddy-local-root.crt
+```
+
+Trust it in macOS System Keychain:
+
+```bash
+sudo security add-trusted-cert \
+  -d \
+  -r trustRoot \
+  -k /Library/Keychains/System.keychain \
+  ./caddy/caddy-local-root.crt
+```
+
+Then restart your browser and open:
+
+```text
+https://jenkins.localhost:8444/
+```
+
+---
+
+## First-Time SSH Agent Trust
+
+This lab uses `manuallyTrustedKeyVerificationStrategy` for SSH agent host key verification.
+
+That means Jenkins will not blindly trust SSH agents on the first connection. An administrator must review and approve each agent's SSH host key.
+
+After `make up`:
+
+1. Open `https://jenkins.localhost:8444/`
+2. Log in as the Jenkins administrator.
+3. Go to **Manage Jenkins → Nodes**.
+4. Open each SSH agent:
+
+   * `ci-arm64-general`
+   * `ci-arm64-alm`
+   * `ci-arm64-docker`
+5. Review and approve the presented SSH host key.
+6. Wait until each agent becomes online.
+
+This is expected behavior.
+
+If an agent container is recreated and its SSH host key changes, Jenkins may require approval again. This is expected for a production-like trust model.
+
+---
+
+## Post-Start Verification
+
+### 1. Check containers
+
+```bash
+make ps
+```
+
+Expected result:
+
+* `jenkins-controller` is running.
+* `jenkins-caddy` is running.
+* `ci-arm64-general` is running.
+* `ci-arm64-alm` is running.
+* `ci-arm64-docker` is running.
+
+### 2. Check logs
+
+```bash
 make logs
 ```
 
-访问：<https://jenkins.localhost:8444/> 或本机映射端口 <http://127.0.0.1:8089/>。
+Look for serious errors such as:
 
-> 如果使用 `jenkins.localhost`，请确认浏览器可解析该地址；Caddy 使用内部 CA，首次访问会提示证书信任问题。
+```text
+SEVERE
+ConfiguratorException
+CannotResolveClassException
+Failed Loading plugin
+```
 
-## 安全与生产化模拟建议
+### 3. Check Jenkins nodes
 
-1. **凭据管理**
-   - 不要提交 `.env` 或 `secrets/jenkins_agent_key`。
-   - 当前 compose 使用 Docker secrets 将 Jenkins agent 私钥挂载到 controller。
-   - 后续可替换为 Vault、云 KMS、企业密码库或 Jenkins Credentials Provider。
-2. **权限模型**
-   - JCasC 使用 matrix-auth，仅给管理员 `Overall/Administer`，认证用户默认只读。
-   - 后续建议按团队增加 folder-level / job-level 权限，避免“所有登录用户都是管理员”。
-3. **Agent 隔离**
-   - `ci-arm64-docker` 挂载 `/var/run/docker.sock`，这等价于授予宿主机 Docker root 级权限。
-   - 只把可信 Job 分配到 `docker buildx` label；更生产化的做法是使用远程 BuildKit、Kaniko、rootless Docker 或独立构建集群。
-4. **入口与网络**
-   - Jenkins HTTP 端口仅绑定 `127.0.0.1`，外部访问优先经 Caddy HTTPS。
-   - 企业环境建议把 Caddy 替换或前置为 Nginx / F5 / Ingress，并接入 OIDC / SSO。
-5. **可观测性**
-   - Compose 已限制容器日志滚动，避免单机学习环境日志无限增长。
-   - 后续建议接入 Prometheus、Grafana、Loki / ELK，并为 controller 磁盘、队列长度、executor 使用率设置告警。
+In Jenkins UI:
 
-## Windchill / Codebeamer 集成准备
+```text
+Manage Jenkins → Nodes
+```
 
-建议把与 ALM/PLM 系统交互的流水线固定到 `ci arm64 linux alm codebeamer windchill` label，并遵循：
+Expected nodes:
 
-- API token、service account、证书放入 Jenkins Credentials，不写入 Jenkinsfile。
-- 将 Windchill / Codebeamer 客户端脚本封装为共享库或独立 CLI，便于测试和复用。
-- 为 API 调用设置超时、重试、幂等 key 和审计日志，避免 Jenkins 重跑造成重复变更。
-- 在 Jenkins job 中记录外部系统对象 ID、变更单号、制品 SHA256、SBOM 链接等追溯信息。
+```text
+Built-In Node
+ci-arm64-general
+ci-arm64-alm
+ci-arm64-docker
+```
 
-## 常用命令
+Expected controller behavior:
+
+```text
+Built-In Node executors = 0
+```
+
+The controller should not run builds.
+
+### 4. Verify agent labels
+
+Expected labels:
+
+| Agent              | Labels                                    |
+| ------------------ | ----------------------------------------- |
+| `ci-arm64-general` | `ci arm64 linux general`                  |
+| `ci-arm64-alm`     | `ci arm64 linux alm codebeamer windchill` |
+| `ci-arm64-docker`  | `ci arm64 linux docker buildx`            |
+
+---
+
+## Recommended Test Pipeline
+
+Create a temporary Jenkins Pipeline job to validate the agents.
+
+In Jenkins:
+
+```text
+New Item → Pipeline
+```
+
+Use this script:
+
+```groovy
+pipeline {
+    agent none
+
+    options {
+        timestamps()
+    }
+
+    stages {
+        stage('General Agent') {
+            agent { label 'linux && arm64 && general' }
+            steps {
+                sh '''
+                    echo "NODE_NAME=$NODE_NAME"
+                    hostname
+                    whoami
+                    java -version
+                    git --version
+                    jq --version
+                '''
+            }
+        }
+
+        stage('ALM Agent') {
+            agent { label 'linux && arm64 && alm' }
+            steps {
+                sh '''
+                    echo "NODE_NAME=$NODE_NAME"
+                    hostname
+                    whoami
+                    curl --version
+                    jq --version
+                '''
+            }
+        }
+
+        stage('Docker Agent') {
+            agent { label 'linux && arm64 && docker' }
+            steps {
+                sh '''
+                    echo "NODE_NAME=$NODE_NAME"
+                    hostname
+                    whoami
+                    docker version
+                    docker compose version
+                    docker buildx version
+                '''
+            }
+        }
+    }
+}
+```
+
+The Docker stage should run only on `ci-arm64-docker`.
+
+---
+
+## Daily Operations
+
+### Start or update the stack
 
 ```bash
-make init       # 创建 .env 和 SSH agent key
-make validate   # 校验 compose 配置
-make build      # 构建镜像
-make up         # 启动或更新 stack
-make down       # 停止 stack
-make logs       # 查看日志
-make backup     # 备份 Jenkins Home named volume
+make up
+```
+
+### Stop the stack
+
+```bash
+make down
+```
+
+### View logs
+
+```bash
+make logs
+```
+
+### Show Compose service status
+
+```bash
+make ps
+```
+
+### Validate Compose configuration
+
+```bash
+make validate
+```
+
+### Rebuild images
+
+```bash
+make build
+```
+
+### Remove stopped containers and orphaned services
+
+```bash
+make clean
+```
+
+`make clean` does not remove named volumes.
+
+---
+
+## Backup
+
+The backup script creates a tar archive of the `jenkins_home` named volume.
+
+Run:
+
+```bash
+make backup
+```
+
+Backups are written to:
+
+```text
+backup/output/
+```
+
+Example:
+
+```text
+backup/output/jenkins_home_20260529-153000.tar.gz
+```
+
+The script resolves the actual Compose volume name automatically using:
+
+```text
+docker compose config --format json
+```
+
+and `jq`.
+
+### Backup before upgrades
+
+Before changing Jenkins version, plugin versions, JCasC structure, or agent images, run:
+
+```bash
+make backup
+```
+
+---
+
+## Restore
+
+To restore a previous Jenkins Home backup:
+
+```bash
 make restore ARCHIVE=backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
 ```
 
-## 升级建议
+Example:
 
-- Jenkins LTS、插件版本和 agent 基础镜像应成组升级，并先在临时 volume 中演练。
-- 升级前执行 `make backup`，升级后检查 JCasC reload、agent 连接、关键流水线和插件兼容性。
-- 插件版本固定在 `controller/plugins.txt`，便于回滚与差异审查。
-- 建议在真实企业环境中定期导出 Jenkins 配置、凭据元数据清单和 job DSL / pipeline 定义。
+```bash
+make restore ARCHIVE=backup/output/jenkins_home_20260529-153000.tar.gz
+```
 
-Upgrade
+The restore process:
+
+1. Stops the Compose stack.
+2. Clears the target `jenkins_home` volume.
+3. Extracts the selected backup archive into the volume.
+
+Restore is destructive. Always verify the backup archive path before running it.
+
+---
+
+## Upgrade Procedure
+
+Use this procedure when upgrading Jenkins LTS, plugin versions, or agent images.
+
+### 1. Back up Jenkins Home
+
 ```bash
 make backup
-# 修改 Jenkins 版本 / plugins.txt
+```
+
+### 2. Modify version-controlled files
+
+Typical files:
+
+```text
+controller/Dockerfile
+controller/plugins.txt
+agents/base/Dockerfile
+agents/docker/Dockerfile
+docker-compose.yml
+casc/jenkins.yaml
+```
+
+### 3. Validate configuration
+
+```bash
+make validate
+```
+
+### 4. Build images
+
+```bash
 make build
+```
+
+### 5. Start the stack
+
+```bash
+make up
+```
+
+### 6. Check logs
+
+```bash
+make logs
+```
+
+### 7. Verify Jenkins
+
+Check:
+
+* Jenkins login
+* JCasC loading
+* Plugin loading
+* Agent connectivity
+* Pipeline execution
+* Docker build capability on `ci-arm64-docker`
+
+---
+
+## Rollback Procedure
+
+If an upgrade fails:
+
+### 1. Stop the stack
+
+```bash
+make down
+```
+
+### 2. Revert version-controlled files
+
+Use Git to revert changes to files such as:
+
+```text
+controller/Dockerfile
+controller/plugins.txt
+casc/jenkins.yaml
+docker-compose.yml
+```
+
+### 3. Restore Jenkins Home
+
+```bash
+make restore ARCHIVE=backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
+```
+
+### 4. Start the stack
+
+```bash
+make up
+```
+
+### 5. Check logs
+
+```bash
+make logs
+```
+
+---
+
+## Security Model
+
+### Controller isolation
+
+The Jenkins Controller is configured with:
+
+```text
+numExecutors: 0
+```
+
+This means build jobs should not run on the controller.
+
+Builds should run on dedicated SSH agents.
+
+### Permission model
+
+JCasC configures a matrix-based authorization model.
+
+The bootstrap administrator receives:
+
+```text
+Overall/Administer
+```
+
+Authenticated users receive read-only access by default.
+
+For a real team setup, create separate folders and apply folder-level or job-level permissions.
+
+Recommended folder structure:
+
+```text
+/ci/general
+/ci/alm
+/ci/docker
+```
+
+The Docker folder should be restricted to trusted maintainers.
+
+### Credential handling
+
+Do not commit:
+
+```text
+.env
+secrets/jenkins_agent_key
+backup/output/
+```
+
+The Jenkins agent private key is mounted into the controller through Docker secrets and then registered as a Jenkins SSH credential through JCasC.
+
+For enterprise production, replace local secrets with one of the following:
+
+* HashiCorp Vault
+* Enterprise secret manager
+* Cloud KMS / secret service
+* Jenkins Credentials Provider integration
+
+---
+
+## SSH Agent Host Key Verification
+
+This lab uses:
+
+```text
+manuallyTrustedKeyVerificationStrategy
+```
+
+This means:
+
+* Jenkins will not blindly trust a new SSH agent.
+* An administrator must approve the SSH host key on first connection.
+* If the SSH host key changes, Jenkins may block the connection again.
+* This is more production-like than disabling verification.
+
+This is still not the strictest production model.
+
+For stricter enterprise-style deployments, consider:
+
+```text
+knownHostsFileKeyVerificationStrategy
+```
+
+That approach requires maintaining a controlled `known_hosts` file and making agent SSH host keys stable.
+
+---
+
+## Docker Socket Risk and Alternatives
+
+The `ci-arm64-docker` agent mounts:
+
+```text
+/var/run/docker.sock
+```
+
+This allows Jenkins pipelines on that agent to run Docker CLI, Docker Compose and Buildx commands.
+
+This is convenient for a local CI/CD lab, but it is a high-trust configuration.
+
+A job with access to this socket can control the host Docker daemon, including:
+
+* Creating containers
+* Removing containers
+* Creating privileged containers
+* Mounting host paths
+* Reading or modifying Docker volumes
+* Interacting with Docker images
+* Creating or modifying Docker networks
+* Affecting other services using the same Docker daemon
+
+Treat this agent as a privileged build worker.
+
+### Current lab policy
+
+* Only trusted Jenkinsfiles should use the `docker` or `buildx` labels.
+* Do not run unreviewed pull request builds on `ci-arm64-docker`.
+* Keep general ALM/PLM API jobs on `ci-arm64-alm`.
+* Keep the Jenkins Controller free of Docker socket access.
+* Treat credentials used by Docker-capable jobs as higher risk.
+* Do not allow arbitrary user-provided scripts to run on the Docker-capable agent.
+
+### Acceptable for this repository
+
+For a local macOS / OrbStack learning environment, this design is acceptable because it is simple, fast and practical.
+
+It should not be copied directly into a production Jenkins architecture without additional isolation and governance.
+
+### Production-oriented alternatives
+
+For a more production-like or enterprise setup, consider the following alternatives.
+
+#### Option 1: Remote BuildKit builder
+
+Use a dedicated BuildKit daemon as a remote builder.
+
+```text
+Jenkins Docker Agent
+  → docker buildx
+  → Remote BuildKit daemon
+  → Container registry
+```
+
+Benefits:
+
+* The Jenkins agent does not need direct access to the host Docker daemon.
+* Build capacity can be isolated and scaled.
+* Better fit for enterprise build infrastructure.
+
+#### Option 2: Dedicated isolated Docker build host
+
+Run Docker builds on a dedicated Linux build host.
+
+```text
+Jenkins Controller
+  → SSH Agent on isolated build host
+  → Local Docker daemon on that build host
+```
+
+Benefits:
+
+* Docker risk is isolated away from the Jenkins Controller host.
+* Easier to rebuild or rotate the build host.
+* Simpler than Kubernetes for small environments.
+
+#### Option 3: Kubernetes dynamic agents
+
+Use Kubernetes-based Jenkins agents with tools such as:
+
+* Kaniko
+* BuildKit
+* Buildah
+
+Benefits:
+
+* Ephemeral build agents
+* Better isolation through Kubernetes namespaces, service accounts and RBAC
+* Closer to cloud-native CI/CD patterns
+
+#### Option 4: Rootless Podman / Buildah
+
+For Red Hat-oriented environments, use rootless Podman or Buildah on a dedicated Linux worker.
+
+Benefits:
+
+* Better alignment with RHEL / OpenShift ecosystems
+* Avoids direct access to a rootful Docker daemon
+* More production-friendly for regulated Linux environments
+
+#### Option 5: Managed build service
+
+Use a managed builder such as Docker Build Cloud or an enterprise equivalent.
+
+Benefits:
+
+* Less local infrastructure to maintain
+* Potentially better caching and scalability
+* Reduced local Docker daemon exposure
+
+---
+
+## Windchill and Codebeamer Integration Guidance
+
+Use `ci-arm64-alm` for ALM/PLM automation.
+
+Recommended label:
+
+```groovy
+agent { label 'linux && arm64 && alm' }
+```
+
+Recommended practices:
+
+* Store Windchill credentials in Jenkins Credentials.
+* Store Codebeamer credentials in Jenkins Credentials.
+* Do not hard-code API tokens in Jenkinsfiles.
+* Use `withCredentials` for secret binding.
+* Add timeouts to all API calls.
+* Add retry logic only for safe and idempotent operations.
+* Log external object IDs, tracker item IDs, change notice numbers and artifact checksums.
+* Keep ALM/PLM API scripts separate from Docker build scripts.
+* Consider moving reusable logic into a Jenkins Shared Library or a dedicated CLI.
+
+Example stages for future pipelines:
+
+```text
+Validate parameters
+Checkout source
+Build or package artifact
+Run tests
+Publish reports
+Call Codebeamer API
+Call Windchill API
+Update traceability records
+Archive artifacts
+```
+
+---
+
+## Agent Labeling Strategy
+
+| Label        | Meaning                       |
+| ------------ | ----------------------------- |
+| `linux`      | Linux-based agent             |
+| `arm64`      | ARM64 architecture            |
+| `general`    | General CI workload           |
+| `alm`        | ALM/PLM automation workload   |
+| `codebeamer` | Codebeamer-related automation |
+| `windchill`  | Windchill-related automation  |
+| `docker`     | Docker CLI capable agent      |
+| `buildx`     | Docker Buildx capable agent   |
+
+Recommended usage:
+
+```groovy
+agent { label 'linux && arm64 && general' }
+```
+
+```groovy
+agent { label 'linux && arm64 && alm' }
+```
+
+```groovy
+agent { label 'linux && arm64 && docker' }
+```
+
+Do not use the Docker labels for untrusted or general-purpose jobs.
+
+---
+
+## Troubleshooting
+
+### Compose validation fails
+
+Run:
+
+```bash
+docker compose config
+```
+
+Check whether `.env` exists:
+
+```bash
+ls -la .env
+```
+
+Check whether the private key exists:
+
+```bash
+ls -la secrets/jenkins_agent_key
+```
+
+Run initialization again if needed:
+
+```bash
+make init
+```
+
+---
+
+### Jenkins does not start
+
+Check logs:
+
+```bash
+make logs
+```
+
+Or:
+
+```bash
+docker logs -f jenkins-controller
+```
+
+Look for:
+
+```text
+Failed Loading plugin
+ConfiguratorException
+CannotResolveClassException
+```
+
+---
+
+### Jenkins cannot load JCasC
+
+Check:
+
+```bash
+docker logs jenkins-controller | grep -i casc
+```
+
+Validate the YAML file:
+
+```bash
+cat casc/jenkins.yaml
+```
+
+Check whether required environment variables are present:
+
+```bash
+cat .env
+```
+
+---
+
+### Agents are offline
+
+This may be expected on first startup because host key trust is required.
+
+Check:
+
+```text
+Manage Jenkins → Nodes
+```
+
+Open each agent and approve the SSH host key if prompted.
+
+Also check agent containers:
+
+```bash
+docker ps | grep ci-arm64
+```
+
+Check whether the public key was injected:
+
+```bash
+grep JENKINS_AGENT_SSH_PUBKEY .env
+```
+
+Check whether the private key exists:
+
+```bash
+ls -la secrets/jenkins_agent_key
+```
+
+---
+
+### Docker commands fail on `ci-arm64-docker`
+
+Open a shell:
+
+```bash
+docker exec -it ci-arm64-docker bash
+```
+
+Check Docker access:
+
+```bash
+docker version
+docker compose version
+docker buildx version
+```
+
+If you see permission errors against `/var/run/docker.sock`, check the Docker socket permissions on the host and the effective user inside the agent.
+
+---
+
+### Browser shows HTTPS certificate warning
+
+This is expected when using Caddy internal CA.
+
+Options:
+
+* Proceed through the browser warning for local testing.
+* Import Caddy's local root CA into macOS Keychain.
+* Use a real domain and certificate for a more production-like setup.
+
+---
+
+### Backup fails because `jq` is missing
+
+Install `jq`:
+
+```bash
+brew install jq
+```
+
+Then retry:
+
+```bash
+make backup
+```
+
+---
+
+## Cleanup
+
+Stop the stack:
+
+```bash
+make down
+```
+
+Remove stopped containers and orphans:
+
+```bash
+make clean
+```
+
+To remove volumes, use Docker commands manually. Be careful: removing volumes deletes Jenkins state.
+
+List volumes:
+
+```bash
+docker volume ls | grep jenkins
+```
+
+Remove a specific volume only if you are sure:
+
+```bash
+docker volume rm <volume-name>
+```
+
+---
+
+## Important Files
+
+| File                             | Purpose                                                 |
+| -------------------------------- | ------------------------------------------------------- |
+| `docker-compose.yml`             | Defines Jenkins Controller, Caddy and static SSH agents |
+| `controller/Dockerfile`          | Builds the Jenkins Controller image                     |
+| `controller/plugins.txt`         | Pins Jenkins plugin versions                            |
+| `agents/base/Dockerfile`         | Builds the base SSH agent image                         |
+| `agents/docker/Dockerfile`       | Builds the Docker-capable SSH agent image               |
+| `casc/jenkins.yaml`              | Jenkins Configuration as Code                           |
+| `caddy/Caddyfile`                | Local HTTPS reverse proxy configuration                 |
+| `Makefile`                       | Common operational commands                             |
+| `backup/backup-jenkins-home.sh`  | Jenkins Home backup script                              |
+| `backup/restore-jenkins-home.sh` | Jenkins Home restore script                             |
+| `.env.example`                   | Template for local environment variables                |
+
+---
+
+## Known Limitations
+
+* This is a single-controller lab environment, not a high-availability Jenkins architecture.
+* Caddy uses a local internal CA by default, not a public or enterprise CA.
+* Docker socket access is intentionally available only on `ci-arm64-docker`, but it remains high risk.
+* SSH host key verification is production-like but not the strictest possible model.
+* This repository is optimized for local learning and architecture simulation, not direct production deployment.
+
+---
+
+## Recommended Next Improvements
+
+Potential future enhancements:
+
+* Add `examples/pipelines/check-agents.Jenkinsfile`
+* Add `examples/pipelines/codebeamer-api-check.Jenkinsfile`
+* Add `examples/pipelines/windchill-api-check.Jenkinsfile`
+* Add `examples/pipelines/docker-build.Jenkinsfile`
+* Add a remote BuildKit example
+* Add a `known_hosts` based SSH host key verification profile
+* Add Jenkins Shared Library examples for Windchill and Codebeamer integration
+* Add monitoring examples with Prometheus and Grafana
+* Add log aggregation examples with Loki or ELK
+
+---
+
+## Usage Summary
+
+For first-time deployment:
+
+```bash
+make init
+vim .env
+make validate
 make up
 make logs
 ```
 
-Rollback
+For daily startup:
+
 ```bash
-make down
-# 恢复旧版本 Dockerfile / plugins.txt
-make restore ARCHIVE=backup/output/xxx.tar.gz
 make up
 ```
 
-## 已知取舍
+For shutdown:
 
-- SSH agent host key verification 当前使用 `manuallyTrustedKeyVerificationStrategy`：
-  Jenkins 首次连接每个 SSH Agent 时，需要管理员在 Jenkins UI 中手工信任该 Agent 的 SSH host key。
-  这比 `nonVerifyingKeyVerificationStrategy` 更贴近企业安全模型，但仍不是最严格的生产方案。
-  更严格的企业方案可以升级为 `knownHostsFileKeyVerificationStrategy`，并将 Agent SSH host key 固化到受控的 `known_hosts` 文件中。
-- `ci-arm64-docker` 挂载 `/var/run/docker.sock`，便于学习 Docker 构建，但安全边界弱；生产环境建议改造为远程 BuildKit、rootless builder、Kubernetes agent 或独立构建集群。
-- 该仓库默认面向单机学习和企业架构模拟，不替代高可用 Jenkins Controller 架构。
+```bash
+make down
+```
 
-## Docker Socket Risk and Alternatives
+For backup:
 
-`ci-arm64-docker` mounts `/var/run/docker.sock` so Jenkins pipelines can run Docker CLI, Docker Compose and Buildx commands.
+```bash
+make backup
+```
 
-This is convenient for a local CI/CD lab, but it is a high-trust configuration. A job with access to this socket can control the host Docker daemon, including creating privileged containers, mounting host paths, removing containers, and interacting with images, networks and volumes.
+For restore:
 
-Current lab policy:
+```bash
+make restore ARCHIVE=backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
+```
 
-- Only trusted Jenkinsfiles should use the `docker` / `buildx` labels.
-- Do not run unreviewed pull request builds on `ci-arm64-docker`.
-- Keep general ALM/PLM API jobs on `ci-arm64-alm`, not on the Docker-capable agent.
-- Keep the Jenkins controller free of Docker socket access.
-- Treat credentials used on Docker-capable jobs as higher risk.
+Primary access URL:
 
-Production-oriented alternatives:
-
-1. Remote BuildKit builder
-2. Dedicated isolated Docker build host
-3. Kubernetes dynamic agents with Kaniko / BuildKit / Buildah
-4. Rootless Podman / Buildah on a dedicated Linux build worker
-5. Docker Build Cloud or equivalent managed builder
-
-For this repository, docker.sock is acceptable for local learning, but it should not be copied directly into a production Jenkins architecture without additional isolation and governance.
-
+```text
+https://jenkins.localhost:8444/
+```
