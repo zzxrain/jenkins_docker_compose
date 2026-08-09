@@ -126,7 +126,12 @@ logs:
 
 .PHONY: verify
 verify:
-	$(COMPOSE) exec jenkins-controller bash -lc '\
+	$(COMPOSE) exec -T jenkins-controller bash -lc '\
+	set -euo pipefail; \
+	echo "==== runtime ===="; \
+	/opt/java/openjdk/bin/java -version; \
+	/opt/java/openjdk/bin/java -jar /usr/share/jenkins/jenkins.war --version; \
+	echo; \
 	echo "==== ref plugins ===="; \
 	find /usr/share/jenkins/ref/plugins -maxdepth 1 -type f | sed "s#.*/##" | sort | grep -Ei "configuration-as-code|matrix-auth|ssh-slaves|credentials" || true; \
 	echo; \
@@ -134,14 +139,34 @@ verify:
 	find /var/jenkins_home/plugins -maxdepth 1 -type f | sed "s#.*/##" | sort | grep -Ei "configuration-as-code|matrix-auth|ssh-slaves|credentials" || true; \
 	echo; \
 	echo "==== security ===="; \
-	grep -nE "useSecurity|securityRealm|authorizationStrategy" /var/jenkins_home/config.xml || true \
+	grep -nE "useSecurity|securityRealm|authorizationStrategy" /var/jenkins_home/config.xml; \
+	grep -q "<useSecurity>true</useSecurity>" /var/jenkins_home/config.xml; \
+	grep -q "GlobalMatrixAuthorizationStrategy" /var/jenkins_home/config.xml; \
+	grep -q "HudsonPrivateSecurityRealm" /var/jenkins_home/config.xml; \
+	! grep -qE "AuthorizationStrategy.*Unsecured|SecurityRealm.*None" /var/jenkins_home/config.xml; \
+	echo; \
+	echo "==== direct plugin pins ===="; \
+	while IFS=: read -r plugin expected; do \
+	  [ -n "$$plugin" ] || continue; \
+	  file="/var/jenkins_home/plugins/$${plugin}.jpi"; \
+	  [ -f "$$file" ] || file="/var/jenkins_home/plugins/$${plugin}.hpi"; \
+	  [ -f "$$file" ]; \
+	  actual=$$(unzip -p "$$file" META-INF/MANIFEST.MF | sed -n "s/^Plugin-Version: //p" | tr -d "\\r" | head -1); \
+	  printf "%s expected=%s actual=%s\\n" "$$plugin" "$$expected" "$$actual"; \
+	  [ "$$actual" = "$$expected" ]; \
+	done < /usr/share/jenkins/ref/plugins.txt; \
+	failed=$$(find /var/jenkins_home/plugins -maxdepth 1 -type f \
+	  \( -name "*.jpi.failed" -o -name "*.hpi.failed" -o -name "*.jpi.disabled" -o -name "*.hpi.disabled" \) \
+	  -print -quit); \
+	[ -z "$$failed" ]; \
+	echo "Controller verification passed." \
 	'
 
 .PHONY: verify-volumes
 verify-volumes:
 	$(COMPOSE) ps -a
 	@echo
-	@echo "==== volume and tmpfs mounts ===="
+	@echo "==== volume and bind mounts ===="
 	@docker ps -a \
 	  --filter name=jenkins-controller \
 	  --filter name=jenkins-caddy \
@@ -156,25 +181,73 @@ verify-volumes:
 	  [$$container, $$image, .Type, (.Name // "-"), .Destination] | @tsv \
 	' | column -t
 	@echo
+	@echo "==== tmpfs mounts ===="
+	@docker ps -a \
+	  --filter name=jenkins-controller \
+	  --filter name=jenkins-caddy \
+	  --filter name=ci-arm64 \
+	  --format '{{.Names}}' \
+	| xargs docker inspect \
+	| jq -r '\
+	  .[] | \
+	  .Name as $$container | \
+	  (.HostConfig.Tmpfs // {}) | \
+	  keys[]? | \
+	  [$$container, .] | @tsv \
+	' | column -t
+	@echo
 	@echo "==== project volumes ===="
 	@docker volume ls --filter label=app=jenkins-compose
+	@echo
+	@echo "==== persistence assertions ===="
+	@set -e; \
+	containers="$$(docker ps -a \
+	  --filter name=jenkins-controller \
+	  --filter name=jenkins-caddy \
+	  --filter name=ci-arm64 \
+	  --format '{{.Names}}')"; \
+	[ -n "$$containers" ]; \
+	for volume in $$(docker inspect $$containers | jq -r '.[] | .Mounts[]? | select(.Type == "volume") | .Name'); do \
+	  app=$$(docker volume inspect "$$volume" --format '{{index .Labels "app"}}'); \
+	  if [ "$$app" != "jenkins-compose" ]; then \
+	    echo "Unexpected or anonymous volume: $$volume" >&2; \
+	    exit 1; \
+	  fi; \
+	done; \
+	agent_ids="$$( $(COMPOSE) ps -q ci-arm64-general ci-arm64-alm ci-arm64-docker )"; \
+	[ -n "$$agent_ids" ]; \
+	docker inspect $$agent_ids | jq -e '\
+	  all(.[]; \
+	    ((.HostConfig.Tmpfs // {}) | has("/home/jenkins/.jenkins")) and \
+	    ((.HostConfig.Tmpfs // {}) | has("/run")) and \
+	    ((.HostConfig.Tmpfs // {}) | has("/tmp")) and \
+	    ((.HostConfig.Tmpfs // {}) | has("/var/run")) \
+	  ) \
+	' >/dev/null; \
+	echo "Volume and tmpfs verification passed."
 
 .PHONY: verify-agents
 verify-agents:
-	$(COMPOSE) exec jenkins-controller bash -lc '\
+	$(COMPOSE) exec -T jenkins-controller bash -lc '\
+	status=0; \
 	for h in ci-arm64-general ci-arm64-alm ci-arm64-docker; do \
 	  echo "==== $$h ===="; \
 	  getent hosts "$$h" || true; \
-	  timeout 5 bash -lc "cat < /dev/null > /dev/tcp/$$h/22" \
-	    && echo "$$h:22 OK" \
-	    || echo "$$h:22 FAILED"; \
-	done \
+	  if timeout 5 bash -lc "cat < /dev/null > /dev/tcp/$$h/22"; then \
+	    echo "$$h:22 OK"; \
+	  else \
+	    echo "$$h:22 FAILED"; \
+	    status=1; \
+	  fi; \
+	done; \
+	exit $$status \
 	'
 
 .PHONY: verify-docker-agent
 verify-docker-agent:
 	# Match the SSH/remoting identity used by real Jenkins Pipeline steps.
-	$(COMPOSE) exec --user jenkins ci-arm64-docker bash -lc '\
+	$(COMPOSE) exec -T --user jenkins ci-arm64-docker bash -lc '\
+	set -euo pipefail; \
 	echo "DOCKER_HOST=$$DOCKER_HOST"; \
 	docker version; \
 	docker buildx version; \
