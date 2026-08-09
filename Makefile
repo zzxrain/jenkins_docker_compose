@@ -5,6 +5,8 @@ ENV_FILE ?= .env
 SECRETS_DIR ?= secrets
 CERTS_DIR ?= certs
 AGENT_KEY ?= $(SECRETS_DIR)/jenkins_agent_key
+# Keep large Jenkins Home archives outside the Git repository by default.
+BACKUP_DIR ?= $(HOME)/DevTools/Backup/jenkins-docker
 
 CONTROLLER_IMAGE ?= local/jenkins-controller:2.568.1-lts-jdk21
 AGENT_BASE_IMAGE ?= local/jenkins-ssh-agent-base:debian-jdk21
@@ -33,7 +35,7 @@ help:
 	@echo "  make verify-agents        Check controller-to-agent TCP connectivity"
 	@echo "  make verify-docker-agent  Check Docker CLI access inside docker-capable agent"
 	@echo "  make export-caddy-root    Export Caddy local root CA certificate"
-	@echo "  make backup               Backup Jenkins home"
+	@echo "  make backup               Backup Jenkins home to $(BACKUP_DIR)"
 	@echo "  make restore ARCHIVE=...  Restore Jenkins home from backup"
 	@echo "  make prune-volumes        Prune unused Docker volumes"
 
@@ -194,10 +196,10 @@ export-caddy-root:
 
 .PHONY: backup restore
 backup:
-	COMPOSE="$(COMPOSE)" ./backup/backup-jenkins-home.sh
+	COMPOSE="$(COMPOSE)" BACKUP_DIR="$(BACKUP_DIR)" ./backup/backup-jenkins-home.sh
 
 restore:
-	@test -n "$(ARCHIVE)" || (echo "Usage: make restore ARCHIVE=backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz" && exit 2)
+	@test -n "$(ARCHIVE)" || (echo 'Usage: make restore ARCHIVE="$(BACKUP_DIR)/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"' && exit 2)
 	$(COMPOSE) down
 	COMPOSE="$(COMPOSE)" CONFIRM_RESTORE=RESTORE ./backup/restore-jenkins-home.sh "$(ARCHIVE)"
 

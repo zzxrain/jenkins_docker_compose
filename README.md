@@ -73,7 +73,9 @@ Jenkins Controller
     └── caddy-local-root.crt
 ```
 
-Generated local files such as `.env`, private keys, Caddy certificates, runtime data, and backup output should not be committed.
+Generated local files such as `.env`, private keys, Caddy certificates, and
+runtime data should not be committed. Jenkins Home archives are written outside
+the repository by default.
 
 ---
 
@@ -235,7 +237,7 @@ make verify-agents
 make verify-docker-agent
 make export-caddy-root
 make backup
-make restore ARCHIVE=backup/output/<archive>.tar.gz
+make restore ARCHIVE="$HOME/DevTools/Backup/jenkins-docker/<archive>.tar.gz"
 make prune-volumes
 ```
 
@@ -559,6 +561,29 @@ Caddy exposes Jenkins over local HTTPS:
 https://apps.localmac.net:8444/
 ```
 
+This local development stack deliberately configures different lifetimes for
+each level of Caddy's internal certificate chain:
+
+| Certificate | Configured lifetime | Renewal behavior |
+| --- | ---: | --- |
+| Local root CA | Caddy default: 3600 days (about 10 years) | Persisted in `caddy_data`; this is the certificate trusted by the host OS |
+| Intermediate CA | 30 days | Managed and rotated automatically by Caddy while it is running |
+| `apps.localmac.net` leaf certificate | 7 days | Enters Caddy's normal renewal window when approximately one third of its lifetime remains |
+
+The 7-day leaf and 30-day intermediate lifetimes are intentional for this
+personal development environment, where the Compose stack may be stopped for
+several days. They reduce avoidable expiry warnings compared with Caddy's
+12-hour/7-day defaults without turning the site certificate into a long-lived
+10-year credential. The leaf lifetime must always be shorter than the
+intermediate lifetime.
+
+Caddy cannot renew certificates while its container is stopped. When the stack
+starts again, Caddy should issue or renew certificates from the persisted local
+CA. Caddy installs the persisted local root into its container trust store, and
+the Compose healthcheck performs a real HTTPS request through that trust store.
+An expired or incomplete served chain therefore makes the `caddy` service
+unhealthy instead of merely checking that the binary exists.
+
 Caddy persists local CA data in:
 
 ```text
@@ -567,6 +592,53 @@ caddy_config
 ```
 
 If these volumes are deleted, Caddy will generate a new local root CA. You must export and trust the new root certificate again.
+
+Do not use `docker compose down -v` unless you intentionally want to delete the
+local CA and all other project volumes. Ordinary `docker compose stop`,
+`docker compose down`, `docker compose restart caddy`, and container recreation
+retain the named volumes.
+
+Inspect the certificate currently served to clients with:
+
+```bash
+openssl s_client \
+  -connect apps.localmac.net:8444 \
+  -servername apps.localmac.net </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+```
+
+If Caddy was stopped past the certificate lifetime and does not recover
+automatically, restart only that service and inspect its logs:
+
+```bash
+docker compose restart caddy
+docker compose logs --tail=100 caddy
+curl -Iv https://apps.localmac.net:8444/
+```
+
+### Certificate lifetime change performed on 2026-08-09
+
+The configuration was changed from Caddy's default 12-hour leaf and 7-day
+intermediate lifetimes to a 7-day leaf and 30-day intermediate. The Caddyfile,
+Compose model, and adapted JSON configuration were validated before the `caddy`
+container was recreated with its existing named volumes.
+
+Validation after the recreation showed:
+
+* `https://apps.localmac.net:8444/login` returned HTTP 200.
+* The real HTTPS healthcheck passed and the container reached `healthy`.
+* The local root fingerprint remained
+  `47:86:50:E7:54:28:BC:BD:F6:80:38:9B:92:AF:3E:7D:C2:07:43:07:3F:7E:B6:B2:DB:22:82:A3:BB:E1:39:43`
+  and its expiry remained 2036-04-06.
+* Caddy's adapted runtime configuration contained a 7-day leaf lifetime and a
+  30-day intermediate lifetime.
+* Caddy initially reused the already-issued valid 12-hour leaf and 7-day
+  intermediate. Caddy does not replace a valid stored certificate merely
+  because its configured lifetime changes; the configured 7-day/30-day values
+  take effect when those certificates are next automatically issued or rotated.
+
+No certificate volume was deleted, no new root CA was generated, and no host
+trust-store update was required.
 
 ---
 
@@ -750,27 +822,61 @@ docker compose down
 make backup
 ```
 
-Backup archives are written to:
+Backup archives are written outside the Git repository by default:
 
 ```text
-backup/output/
+$HOME/DevTools/Backup/jenkins-docker/
 ```
+
+On the macOS development host used for this project, this resolves to:
+
+```text
+/Users/pandahorn/DevTools/Backup/jenkins-docker/
+```
+
+Override the destination for a one-off backup when needed:
+
+```bash
+make backup BACKUP_DIR=/absolute/path/to/another/backup-directory
+```
+
+The backup script normalizes both absolute and relative `BACKUP_DIR` values
+before mounting the destination into its temporary archive container. Large
+archives therefore never need to be created inside the Git working tree.
 
 Validate the archive before changing the controller version:
 
 ```bash
-gzip -t backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
-tar tzf backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz >/dev/null
-shasum -a 256 backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
+gzip -t "$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
+tar tzf "$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz" >/dev/null
+shasum -a 256 "$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
 ```
 
 ### Restore Jenkins Home
 
 ```bash
-make restore ARCHIVE=backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
+make restore \
+  ARCHIVE="$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
 ```
 
-Restore is destructive. Use only with a known-good backup.
+The restore script accepts archives outside the repository and mounts only the
+selected archive's parent directory read-only. Restore is destructive. Use only
+with a known-good backup.
+
+### Backup directory migration performed on 2026-08-09
+
+The existing 256 MB cold backup was moved from the repository-local
+`backup/output` directory to:
+
+```text
+/Users/pandahorn/DevTools/Backup/jenkins-docker/jenkins_home_20260809-112146.tar.gz
+```
+
+The SHA-256 remained
+`ce81b598163a1b2a5ebca7e677e9cba1b20c78d06a1fc2138fd0a0bdbf446163`,
+and both `gzip -t` and a complete `tar tzf` listing passed after the move. The
+now-empty `backup/output` directory was removed. No Jenkins volume or archive
+content was deleted.
 
 ---
 
@@ -1178,10 +1284,11 @@ docker system df
 All five project services were stopped. The Jenkins Home metadata reported
 `2.555.2`, and 90 plugin files were present in the named volume.
 
-A cold backup was then created:
+A cold backup was then created in the original repository-local output
+directory and later moved, without changing its contents, to:
 
 ```text
-backup/output/jenkins_home_20260809-112146.tar.gz
+/Users/pandahorn/DevTools/Backup/jenkins-docker/jenkins_home_20260809-112146.tar.gz
 ```
 
 Recorded validation data:
@@ -1331,7 +1438,7 @@ together.
 For this upgrade, the rollback point is the `2.555.2` controller image plus:
 
 ```text
-backup/output/jenkins_home_20260809-112146.tar.gz
+/Users/pandahorn/DevTools/Backup/jenkins-docker/jenkins_home_20260809-112146.tar.gz
 ```
 
 Rollback sequence:
@@ -1343,7 +1450,7 @@ docker compose down
 # controller/plugins.txt, and casc/jenkins.yaml from the pre-upgrade revision.
 
 make restore \
-  ARCHIVE=backup/output/jenkins_home_20260809-112146.tar.gz
+  ARCHIVE="/Users/pandahorn/DevTools/Backup/jenkins-docker/jenkins_home_20260809-112146.tar.gz"
 
 docker compose up -d --no-build
 docker compose ps
