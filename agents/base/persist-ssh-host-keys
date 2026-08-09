@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+KEY_DIR="${1:?Usage: persist-ssh-host-keys <persistent-directory>}"
+
+# SSH host identities must survive container recreation when Jenkins uses
+# manual host-key verification. Store them inside the agent's named workspace
+# volume, but keep the private keys root-owned and inaccessible to build jobs.
+install -d -m 0700 -o root -g root "${KEY_DIR}"
+
+if ! find "${KEY_DIR}" -maxdepth 1 -type f -name 'ssh_host_*_key' -print -quit | grep -q .; then
+  ssh-keygen -A
+  cp -p /etc/ssh/ssh_host_* "${KEY_DIR}/"
+fi
+
+cp -p "${KEY_DIR}"/ssh_host_* /etc/ssh/
+chown root:root "${KEY_DIR}"/ssh_host_* /etc/ssh/ssh_host_*
+chmod 0600 "${KEY_DIR}"/ssh_host_*_key /etc/ssh/ssh_host_*_key
+chmod 0644 "${KEY_DIR}"/ssh_host_*_key.pub /etc/ssh/ssh_host_*_key.pub

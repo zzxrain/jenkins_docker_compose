@@ -8,7 +8,7 @@ AGENT_KEY ?= $(SECRETS_DIR)/jenkins_agent_key
 # Keep large Jenkins Home archives outside the Git repository by default.
 BACKUP_DIR ?= $(HOME)/DevTools/Backup/jenkins-docker
 
-CONTROLLER_IMAGE ?= local/jenkins-controller:2.568.1-lts-jdk21
+CONTROLLER_IMAGE ?= local/jenkins-controller:2.568.2-lts-jdk21
 AGENT_BASE_IMAGE ?= local/jenkins-ssh-agent-base:debian-jdk21
 AGENT_DOCKER_IMAGE ?= local/jenkins-ssh-agent-docker:debian-jdk21
 

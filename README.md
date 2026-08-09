@@ -61,7 +61,8 @@ Jenkins Controller
 │   └── plugins.txt
 ├── agents/
 │   ├── base/
-│   │   └── Dockerfile
+│   │   ├── Dockerfile
+│   │   └── persist-ssh-host-keys
 │   └── docker/
 │       └── Dockerfile
 ├── backup/
@@ -457,20 +458,32 @@ Look for the host key trust prompt and approve the SSH host key.
 
 After approval, relaunch the agent.
 
-### Why this happens again after reset
+### Host key persistence and reset behavior
 
-If you recreate agent containers, their SSH host keys may change.
+Each agent stores its SSH server host keys in the root-owned
+`.ssh-host-keys` directory inside that agent's named workspace volume. The
+`persist-ssh-host-keys` helper restores those keys before `sshd` starts.
+Consequently, ordinary container operations preserve the trusted identity:
 
-Operations that can cause this:
+```bash
+docker compose down
+docker compose up -d
+docker compose up -d --force-recreate
+```
+
+The host key changes only when the corresponding named volume is removed, for
+example by:
 
 ```bash
 make reset
 make reset-all
 docker compose down -v
-docker compose up --force-recreate
 ```
 
-When host keys change, Jenkins will ask for trust approval again.
+After a volume reset, the agent generates a new host key and Jenkins correctly
+requires a new manual trust decision. The persisted private host keys remain
+root-owned with mode `0600`; Pipeline jobs running as `jenkins` cannot read
+them.
 
 ### Local-only alternative: disable host key verification
 
@@ -1134,8 +1147,9 @@ make rebuild-agent-docker
 docker compose up -d --no-deps --force-recreate ci-arm64-docker
 ```
 
-Recreating an SSH agent can change its host key. If Jenkins blocks the new
-connection, review and trust the new key as described in section 11.
+Ordinary Agent recreation retains its host key in the named workspace volume.
+If the volume was deleted and Jenkins blocks the newly generated key, review
+and trust it as described in section 11.
 
 ---
 
@@ -1238,7 +1252,7 @@ It is both an audit record and the reference procedure for the next LTS update.
 
 ### 23.1 Goal and preserved architecture
 
-The controller was upgraded from Jenkins `2.555.2 LTS` to the current stable
+The controller was upgraded from Jenkins `2.555.2 LTS` to the then-targeted
 Jenkins `2.568.1 LTS`, while keeping Java 21 and the existing architecture:
 
 ```text
@@ -1259,7 +1273,7 @@ Final controller references are kept consistent in:
 * `docker-compose.yml`
 * `Makefile`
 
-The final controller base image is:
+The controller base image at the end of that upgrade was:
 
 ```dockerfile
 FROM jenkins/jenkins:2.568.1-lts-jdk21
@@ -1428,6 +1442,8 @@ The running Docker agent was repaired in place to preserve its already trusted
 SSH host key. Its rebuilt image and updated entrypoint will apply the same ACL
 automatically on the next container recreation. A future forced recreation may
 generate a new SSH host key and require the administrator to trust it again.
+That lifecycle limitation was subsequently fixed during the `2.568.2` update;
+see section 24.2.
 
 ### 23.6 Rollback procedure
 
@@ -1484,3 +1500,135 @@ For future upgrades, repeat the same control points:
    `jenkins`, and run the three-agent smoke Pipeline.
 9. Retain the old image and cold backup until the upgraded installation has
    survived normal jobs and at least one planned restart.
+
+---
+
+## 24. Update History
+
+This is the append-only chronological index of changes actually applied to the
+running lab. Add each future Jenkins, plugin, agent, proxy, or operational
+update as a new dated subsection. Keep section 23 as the detailed reference for
+the first cross-LTS migration procedure.
+
+### 24.1 2026-08-09 — Jenkins 2.555.2 to 2.568.1 LTS
+
+Purpose:
+
+* Move the controller to the Jenkins `2.568` LTS baseline while retaining JDK
+  21, Compose, JCasC, named volumes, Caddy, credentials, and all three agents.
+* Apply the required intermediate boot through `2.555.3`.
+* Refresh and lock the compatible direct plugin baseline.
+
+Executed sequence:
+
+```text
+2.555.2-lts-jdk21
+        -> 2.555.3-lts-jdk21
+        -> 2.568.1-lts-jdk21
+```
+
+Rollback archive:
+
+```text
+/Users/pandahorn/DevTools/Backup/jenkins-docker/jenkins_home_20260809-112146.tar.gz
+SHA-256: ce81b598163a1b2a5ebca7e677e9cba1b20c78d06a1fc2138fd0a0bdbf446163
+```
+
+Results:
+
+* Jenkins started on `2.568.1` with Temurin Java `21.0.11`.
+* All 90 resolved plugins loaded and the 17 direct plugin pins were retained.
+* Controller, Caddy, and all three agents reached `healthy`.
+* The three-stage smoke Pipeline succeeded after Docker socket access was
+  corrected for the real `jenkins` runtime identity.
+* Caddy TLS lifetimes and the external backup directory were subsequently
+  adjusted and recorded in their respective README sections.
+
+This version was superseded later the same day after the Jenkins UI exposed the
+2026-08-05 core security advisory and the official `2.568.2` LTS fix.
+
+### 24.2 2026-08-09 — Jenkins 2.568.1 to 2.568.2 LTS
+
+Reason:
+
+* Jenkins `2.568.1` and earlier were affected by the core vulnerabilities in
+  the [Jenkins Security Advisory 2026-08-05](https://www.jenkins.io/security/advisory/2026-08-05/).
+* The advisory specifies `2.568.2` as the fixed LTS release. The patch retains
+  the same `2.568` LTS baseline and JDK 21 runtime.
+
+Changed controller references:
+
+* `controller/Dockerfile`
+* `docker-compose.yml`
+* `Makefile`
+
+The resulting controller uses:
+
+```dockerfile
+FROM jenkins/jenkins:2.568.2-lts-jdk21
+```
+
+The official base image resolved during the build to:
+
+```text
+sha256:8547df3b0db2803d158ecc9499207a056bb30c23fddc18bb5b4a4dc14e77dd09
+```
+
+Pre-upgrade rollback point:
+
+```text
+controller: local/jenkins-controller:2.568.1-lts-jdk21
+archive: /Users/pandahorn/DevTools/Backup/jenkins-docker/jenkins_home_20260809-162121.tar.gz
+size: 258 MiB
+SHA-256: 4c1c2233af867aa9df827cc19ba96c7cb0dc3418f896da09f6adac8daf3768dd
+```
+
+The cold archive passed `gzip -t`, a complete `tar tzf` listing, and SHA-256
+verification before the controller version changed.
+
+Executed upgrade and verification:
+
+1. Confirmed that the official `2.568.2-lts-jdk21` multi-architecture image tag
+   was available.
+2. Stopped all five services and created the external cold backup above.
+3. Built `local/jenkins-controller:2.568.2-lts-jdk21`; plugin resolution against
+   the target core completed successfully without changing the 17 direct pins.
+4. Started only the controller and inspected its complete initialization log.
+   It reported `2.568.1 -> 2.568.2`, `Started all plugins`, `Completed
+   initialization`, and `Jenkins is fully up and running`.
+5. Confirmed Jenkins `2.568.2`, Temurin Java `21.0.11`, 90 loaded plugin files,
+   zero failed/disabled plugin markers, and exact agreement with every direct
+   plugin pin.
+6. Confirmed JCasC security, named volumes, read-only configuration, Docker
+   secret, Docker socket ACL, and controller-to-agent TCP connectivity.
+7. Confirmed all five Compose services were healthy, all three Jenkins agents
+   were online, and `https://apps.localmac.net:8444/login` returned HTTP 200.
+8. Confirmed the Jenkins management page no longer displayed the 2026-08-05
+   core advisory and the HTTP response header reported `X-Jenkins: 2.568.2`.
+
+The full-stack restart exposed an existing lifecycle defect: Agent containers
+generated new SSH host keys on recreation while Jenkins correctly enforced
+manual trust. The fix keeps each Agent's host keys in its root-only named
+workspace volume and restores them before `sshd` starts. The verified ED25519
+fingerprints are:
+
+```text
+ci-arm64-general  SHA256:7SAf9VbAn6v54NAb+spjhnYahFyHLEDOC3hN6XMsBbg
+ci-arm64-alm      SHA256:tDJ6OgEnxoraEff6SUAatbkcaLf7NKg9bttEvxn0OJU
+ci-arm64-docker   SHA256:UP2F9rouAm2kUqYszZE6o8BJw3d6k9Dn9LZnh4GYE+8
+```
+
+After one explicit review and trust operation, all three Agent containers were
+force-recreated a second time. Their fingerprints remained identical and all
+nodes reconnected without another trust action.
+
+Finally, temporary Pipeline `upgrade-smoke-2-568-2` build number 1 ran
+`examples/pipelines/check-agents.Jenkinsfile` and completed with `SUCCESS` on
+the General, ALM, and Docker agents, including Docker Engine, Compose, and
+Buildx calls as the `jenkins` user. The temporary job was deleted immediately
+after verification.
+
+Rollback for this patch requires both the `2.568.1` repository/image state and
+the matching `jenkins_home_20260809-162121.tar.gz` archive above. Do not start
+the older core against the Home directory after migration without restoring the
+matching backup.
