@@ -183,6 +183,10 @@ secrets/jenkins_agent_key.pub
 
 Recommended clean setup:
 
+> **Destructive, fresh installations only.** `make reset-all` deletes Jenkins
+> Home, Agent workspace/SSH-host-key volumes, Caddy CA data, and local project
+> images. Never use this sequence for an upgrade or rollback; use section 25.
+
 ```bash
 git pull
 make reset-all
@@ -1209,6 +1213,10 @@ Important notes:
 
 ## 22. Recommended Full Startup Sequence
 
+> **This sequence resets all persisted project state.** It is intended only for
+> a new disposable lab. For an existing Jenkins controller, especially during
+> an upgrade, follow section 25 and do not run `make reset-all`.
+
 ```bash
 git pull
 make reset-all
@@ -1482,24 +1490,10 @@ state.
 
 ### 23.7 Procedure for the next LTS upgrade
 
-For future upgrades, repeat the same control points:
-
-1. Read every skipped LTS upgrade guide and confirm the controller and all
-   agents meet the required Java version.
-2. Stop the stack, create a cold backup, verify the archive, and record its
-   checksum.
-3. Keep the old image and never reuse its tag for the new controller.
-4. Ask `jenkins-plugin-cli` for updates using the target core version; update
-   and pin direct plugins before building.
-5. Treat any plugin dependency error as a stop condition.
-6. If crossing an LTS baseline, boot and verify the final patch of the current
-   LTS line first.
-7. Start only the controller, inspect the full initialization log, then start
-   Caddy and agents.
-8. Verify as the real runtime identities, especially Docker access as
-   `jenkins`, and run the three-agent smoke Pipeline.
-9. Retain the old image and cold backup until the upgraded installation has
-   survived normal jobs and at least one planned restart.
+Use the command-by-command runbook in section 25. It incorporates the failure
+modes found during both upgrades and defines a stop condition for every unsafe
+transition. Do not reconstruct an upgrade procedure from this historical
+section alone.
 
 ---
 
@@ -1632,3 +1626,378 @@ Rollback for this patch requires both the `2.568.1` repository/image state and
 the matching `jenkins_home_20260809-162121.tar.gz` archive above. Do not start
 the older core against the Home directory after migration without restoring the
 matching backup.
+
+### 24.3 2026-08-09 — Post-upgrade runbook hardening
+
+After the `2.568.2` upgrade, the documentation was reviewed against the exact
+commands and failures observed during the work. Section 25 was added as the
+authoritative manual upgrade runbook. In particular, it prevents these
+previously encountered mistakes:
+
+* selecting an already vulnerable LTS patch instead of checking the latest
+  security advisory and current patch release;
+* creating large backups inside the Git working tree;
+* deleting named volumes with `make reset`, `make reset-all`, or
+  `docker compose down -v` during an upgrade;
+* building the Docker Agent concurrently with, or before, its local base image;
+* using `--pull` for the Docker Agent's local-only base image;
+* treating a root-only Docker socket test as proof that Pipeline jobs work;
+* recreating Agents without understanding when their manually trusted SSH host
+  identities are preserved or intentionally replaced;
+* starting the full stack before the upgraded controller has passed standalone
+  initialization checks; and
+* rolling an image back without restoring its matching pre-upgrade Jenkins Home.
+
+---
+
+## 25. Safe Manual Jenkins Upgrade Runbook
+
+This is the authoritative procedure for future controller upgrades. Run it
+from the repository root. Replace the example versions and archive name with
+the values for that upgrade; do not copy a historical version blindly.
+
+### 25.1 Decide the exact target before editing files
+
+1. Check the official [Jenkins LTS release line](https://www.jenkins.io/download/lts/),
+   [LTS changelog](https://www.jenkins.io/changelog-stable/),
+   [upgrade guides](https://www.jenkins.io/doc/upgrade-guide/), and
+   [security advisories](https://www.jenkins.io/security/advisories/). Use the
+   latest fixed patch in the intended LTS line. A version that was current a
+   few days earlier may already be affected by a newly published advisory.
+2. Confirm the exact official Docker tag exists, including its JDK suffix and
+   required CPU architecture. This project intentionally remains on JDK 21:
+
+   ```text
+   jenkins/jenkins:<target>-lts-jdk21
+   ```
+
+   Inspect the manifest without changing the running stack:
+
+   ```bash
+   docker buildx imagetools inspect jenkins/jenkins:<target>-lts-jdk21
+   ```
+
+3. If only the patch changes inside the same LTS line, for example
+   `2.568.1 -> 2.568.2`, upgrade directly. If crossing LTS baselines, read every
+   skipped upgrade guide and first boot the latest patch of the current LTS line
+   when Jenkins requires or recommends that intermediate step.
+4. Confirm Java requirements for both controller and Agents before proceeding.
+
+**Stop if:** the target tag does not exist for the host architecture, a skipped
+upgrade guide has not been reviewed, or the required Java version is unknown.
+
+### 25.2 Capture a clean baseline and rollback pair
+
+Validate the current repository and runtime before stopping anything:
+
+```bash
+git status --short --branch
+git rev-parse HEAD
+docker compose config --quiet
+docker compose ps -a
+docker compose exec -T jenkins-controller java -version
+docker compose exec -T jenkins-controller \
+  java -jar /usr/share/jenkins/jenkins.war --version
+docker image inspect "$(docker compose config --images | grep 'local/jenkins-controller:')" \
+  --format '{{json .RepoTags}} {{.Id}} {{.Created}}'
+for service in ci-arm64-general ci-arm64-alm ci-arm64-docker; do
+  docker compose exec -T "$service" \
+    ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+done
+```
+
+Record the current Git commit, controller image tag/ID, Jenkins version, Java
+version, service health, and the three Agent ED25519 fingerprints. Commit or
+intentionally set aside unrelated local changes so the pre-upgrade repository
+state can be recovered exactly.
+
+Create a **cold** Jenkins Home backup. Ordinary `docker compose down` removes
+containers and the project network but preserves named volumes:
+
+```bash
+docker compose down
+make backup
+```
+
+The script prints the exact archive path. It defaults to the host directory
+below, outside the Git repository:
+
+```text
+$HOME/DevTools/Backup/jenkins-docker/
+```
+
+Copy the printed path into a shell variable and validate the entire archive:
+
+```bash
+UPGRADE_BACKUP="$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
+test -f "$UPGRADE_BACKUP"
+gzip -t "$UPGRADE_BACKUP"
+tar tzf "$UPGRADE_BACKUP" >/dev/null
+shasum -a 256 "$UPGRADE_BACKUP"
+```
+
+Record the path, size, and SHA-256 in section 24 before changing the controller.
+Do not use `make reset`, `make reset-all`, or `docker compose down -v`: all three
+delete named volumes. `make reset-all` also removes local rollback images. Do
+not use the old repository-local `backup/output` path.
+
+**Stop if:** the baseline is already unhealthy, the archive is missing, either
+archive integrity command fails, or the rollback image/revision cannot be
+identified.
+
+### 25.3 Change all authoritative version references together
+
+Update the controller version in all three files:
+
+```text
+controller/Dockerfile  FROM jenkins/jenkins:<target>-lts-jdk21
+docker-compose.yml     image: local/jenkins-controller:<target>-lts-jdk21
+Makefile               CONTROLLER_IMAGE ?= local/jenkins-controller:<target>-lts-jdk21
+```
+
+Check that no active reference still points to the old version:
+
+```bash
+rg -n '<old-version>|<target-version>' \
+  controller/Dockerfile docker-compose.yml Makefile
+docker compose config --quiet
+```
+
+Historical entries in section 23 and section 24 must keep their original
+versions. Do not mechanically replace the old version throughout README.
+
+`controller/plugins.txt` contains the 17 direct plugin pins and is the
+source-controlled plugin baseline. Review available plugin updates against the
+target core. The controller build runs `jenkins-plugin-cli` for the target
+image and resolves transitive dependencies; do not rely only on what the
+currently running Jenkins UI offers.
+
+**Stop if:** the three active version references disagree, Compose validation
+fails, or a direct plugin update has not been checked against the target core.
+
+### 25.4 Build the controller and treat plugin errors as fatal
+
+Build only the controller first:
+
+```bash
+docker compose --progress=plain build --no-cache --pull jenkins-controller
+```
+
+The build must finish successfully, show `jenkins-plugin-cli` resolving the
+plugin set, and produce the exact new local tag. Record the resolved official
+base-image digest from the build output when maintaining the update history.
+
+Do not rebuild Agents for a controller-only patch. If Agent source also changed,
+build them **sequentially**, only after the base build has completely finished:
+
+```bash
+make rebuild-agent-base
+make rebuild-agent-docker
+```
+
+The Docker Agent starts with:
+
+```dockerfile
+FROM local/jenkins-ssh-agent-base:debian-jdk21
+```
+
+Therefore, do not build the two Agent images concurrently and do not add
+`--pull` to the Docker Agent build. Either mistake can build from a stale local
+base or make Docker try and fail to pull `docker.io/local/...`.
+
+**Stop if:** `jenkins-plugin-cli` reports a dependency/core-version conflict,
+the resulting controller tag is wrong, or the Docker Agent build did not use
+the newly completed local base image.
+
+### 25.5 Start and approve the controller before the rest of the stack
+
+Start only the upgraded controller against the backed-up Home:
+
+```bash
+docker compose up -d --no-build jenkins-controller
+docker compose ps jenkins-controller
+docker compose logs --no-color jenkins-controller
+```
+
+Wait for all of these messages, not merely a running container:
+
+```text
+Started all plugins
+Completed initialization
+Jenkins is fully up and running
+```
+
+Do not shorten this first review to a small log tail: the version-migration and
+early plugin messages can occur well before the final readiness message.
+
+Also check the recorded upgrade path and runtime versions:
+
+```bash
+docker compose exec -T jenkins-controller bash -lc '
+  java -version
+  java -jar /usr/share/jenkins/jenkins.war --version
+  printf "lastExecVersion="
+  cat /var/jenkins_home/jenkins.install.InstallUtil.lastExecVersion
+  find /var/jenkins_home/plugins -maxdepth 1 -type f \
+    \( -name "*.jpi" -o -name "*.hpi" \) | wc -l
+  find /var/jenkins_home/plugins -maxdepth 1 -type f \
+    \( -name "*.jpi.failed" -o -name "*.hpi.failed" \
+       -o -name "*.jpi.disabled" -o -name "*.hpi.disabled" \) -print
+'
+make verify
+```
+
+Compare every direct pin in `controller/plugins.txt` with the installed plugin
+manifests:
+
+```bash
+docker compose exec -T jenkins-controller bash -lc '
+  set -euo pipefail
+  while IFS=: read -r plugin expected; do
+    [ -n "$plugin" ] || continue
+    file="/var/jenkins_home/plugins/${plugin}.jpi"
+    [ -f "$file" ] || file="/var/jenkins_home/plugins/${plugin}.hpi"
+    [ -f "$file" ]
+    actual=$(unzip -p "$file" META-INF/MANIFEST.MF |
+      sed -n "s/^Plugin-Version: //p" | tr -d "\r" | head -1)
+    printf "%s expected=%s actual=%s\n" "$plugin" "$expected" "$actual"
+    [ "$actual" = "$expected" ]
+  done < /usr/share/jenkins/ref/plugins.txt
+'
+```
+
+This command exits nonzero for a missing or mismatched direct plugin. A
+successful HTTP healthcheck alone does not prove that all plugins loaded.
+Review the complete initialization log for failed plugins, JCasC exceptions,
+detached-plugin warnings, or migration errors.
+
+**Stop if:** the controller is unhealthy, the version is not the target,
+`lastExecVersion` is wrong, a failed/disabled marker exists, a direct plugin pin
+does not match, or the required initialization messages are absent.
+
+### 25.6 Start Caddy and Agents without accidental rebuilds
+
+After the controller passes standalone checks, start the unchanged services:
+
+```bash
+docker compose up -d --no-build
+docker compose ps
+```
+
+All five services must become healthy. `--no-build` is intentional here: it
+prevents Compose from unexpectedly rebuilding an Agent after the controlled
+build phase.
+
+Agent SSH host keys are restored from root-only `.ssh-host-keys` directories in
+their named workspace volumes. Thus normal `down`, `up`, and `--force-recreate`
+operations preserve the Jenkins-trusted identities. Compare these values with
+the pre-upgrade fingerprints recorded in section 25.2:
+
+```bash
+for service in ci-arm64-general ci-arm64-alm ci-arm64-docker; do
+  docker compose exec -T "$service" \
+    ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+done
+```
+
+If a workspace volume was deleted, or the stack is being upgraded from a
+revision that predates `persist-ssh-host-keys`, a new fingerprint is expected.
+Review it and use **Manage Jenkins -> Nodes -> node -> Log / Launch agent ->
+Trust SSH host key** once. Never disable verification merely to make an
+unexpected key change disappear. A changed key without a known volume reset is
+a stop condition and must be investigated.
+
+When Agent images were changed, force-recreate them only after their sequential
+builds and then repeat the fingerprint comparison:
+
+```bash
+docker compose up -d --no-build --force-recreate \
+  ci-arm64-general ci-arm64-alm ci-arm64-docker
+```
+
+### 25.7 Verify the same paths and identities used by real jobs
+
+Run the project checks:
+
+```bash
+make ps
+make verify
+make verify-volumes
+make verify-agents
+make verify-docker-agent
+```
+
+`make verify-docker-agent` intentionally runs as `jenkins`. Do not substitute a
+root shell test: the `root:root 0660` Docker socket previously passed as root
+while a real Pipeline failed. The Docker Agent entrypoint grants only the
+`jenkins` user a socket ACL, which must be re-applied successfully on every
+container start.
+
+In Jenkins, select **New Item**, create a temporary **Pipeline**, copy the full
+contents of `examples/pipelines/check-agents.Jenkinsfile` into **Pipeline ->
+Script**, save, and select **Build Now**. It must finish with `SUCCESS` on
+General, ALM, and Docker stages; the Docker stage must execute Engine, Compose,
+and Buildx commands as `jenkins`. Delete the temporary job after recording the
+result.
+
+Then verify the externally used endpoint and target version:
+
+```bash
+curl --cacert certs/caddy-local-root.crt \
+  -fsSI https://apps.localmac.net:8444/login \
+  | grep -Ei '^(HTTP/|x-jenkins:)'
+```
+
+Confirm HTTP 200, `X-Jenkins: <target>`, all three nodes online, JCasC security
+still enabled, and no applicable core advisory on **Manage Jenkins**. Finally,
+perform one planned full-stack container recreation, not merely `restart`, and
+repeat health, fingerprint, node, Pipeline, and HTTPS checks:
+
+```bash
+docker compose down
+docker compose up -d --no-build
+```
+
+This catches host-key and startup lifecycle defects that an in-place process
+restart or first boot cannot reveal.
+
+**The upgrade is complete only when:** the standalone controller gate, all five
+service healthchecks, three-node Pipeline, real-identity Docker check, HTTPS
+check, security-advisory check, and planned-restart check all pass.
+
+### 25.8 Roll back image and Home as one unit
+
+Do not start an older Jenkins image against Home after a newer core has migrated
+it. Restore both halves of the rollback pair captured in section 25.2:
+
+1. Stop the stack with `docker compose down`.
+2. Restore the exact pre-upgrade Git revision, or revert all controller/plugin/
+   JCasC changes to that revision.
+3. Confirm the old local controller image still exists; rebuild it from the old
+   revision if necessary.
+4. Restore the matching cold archive:
+
+   ```bash
+   make restore ARCHIVE="$UPGRADE_BACKUP"
+   ```
+
+5. Start without rebuilding and repeat the normal verification:
+
+   ```bash
+   docker compose up -d --no-build
+   make ps
+   make verify
+   make verify-volumes
+   make verify-agents
+   make verify-docker-agent
+   ```
+
+`make restore` is destructive: it stops Compose, clears the Jenkins Home named
+volume, and extracts the selected archive. It does not restore repository files
+or the controller image, which is why those must be returned to the matching
+pre-upgrade state first.
+
+Retain the old image and verified cold backup until the new installation has
+survived normal jobs and at least one planned restart. Append the target,
+backup checksum, image digest, commands, results, exceptions, and rollback pair
+to section 24 so the next upgrade starts from an auditable state.
