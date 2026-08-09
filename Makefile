@@ -6,7 +6,7 @@ SECRETS_DIR ?= secrets
 CERTS_DIR ?= certs
 AGENT_KEY ?= $(SECRETS_DIR)/jenkins_agent_key
 
-CONTROLLER_IMAGE ?= local/jenkins-controller:2.555.2-lts-jdk21
+CONTROLLER_IMAGE ?= local/jenkins-controller:2.568.1-lts-jdk21
 AGENT_BASE_IMAGE ?= local/jenkins-ssh-agent-base:debian-jdk21
 AGENT_DOCKER_IMAGE ?= local/jenkins-ssh-agent-docker:debian-jdk21
 
@@ -171,7 +171,8 @@ verify-agents:
 
 .PHONY: verify-docker-agent
 verify-docker-agent:
-	$(COMPOSE) exec ci-arm64-docker bash -lc '\
+	# Match the SSH/remoting identity used by real Jenkins Pipeline steps.
+	$(COMPOSE) exec --user jenkins ci-arm64-docker bash -lc '\
 	echo "DOCKER_HOST=$$DOCKER_HOST"; \
 	docker version; \
 	docker buildx version; \

@@ -11,6 +11,7 @@ This project is designed for local development and technical validation on macOS
 * Local Caddy root CA export for browser trust
 * Static SSH build agents
 * Dedicated Docker-capable Jenkins agent
+* ACL-scoped Docker socket access for the Jenkins Pipeline user
 * Jenkins Matrix Authorization Strategy
 * SSH key based agent authentication
 * Production-like SSH host key trust behavior
@@ -504,6 +505,10 @@ Run:
 make verify-docker-agent
 ```
 
+The verification target deliberately runs as the `jenkins` user, matching the
+identity used by real SSH/remoting Pipeline steps. A root-only check can hide
+socket permission failures.
+
 Expected:
 
 ```text
@@ -529,6 +534,18 @@ and mounts the host Docker socket:
 ```yaml
 - /var/run/docker.sock:/docker.sock
 ```
+
+OrbStack and Docker Desktop may expose the mounted socket as `root:root` with
+mode `0660`. The Docker agent image includes `setfacl`, and its service-specific
+entrypoint grants access only to the `jenkins` user before starting `sshd`:
+
+```bash
+setfacl -m u:jenkins:rw /docker.sock
+```
+
+This avoids adding `jenkins` to the container's broad `root` group. It does not
+reduce the inherent privilege of Docker daemon access: any process that can use
+the socket has root-equivalent control of the Docker host.
 
 This gives the agent high privilege over the host Docker daemon. Only trusted pipelines should run on Docker-capable labels.
 
@@ -724,7 +741,12 @@ Expected:
 
 ### Backup Jenkins Home
 
+For an upgrade or rollback point, create a cold backup. Stop the stack first so
+that job records, queues, plugin files, and configuration are mutually
+consistent:
+
 ```bash
+docker compose down
 make backup
 ```
 
@@ -732,6 +754,14 @@ Backup archives are written to:
 
 ```text
 backup/output/
+```
+
+Validate the archive before changing the controller version:
+
+```bash
+gzip -t backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
+tar tzf backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz >/dev/null
+shasum -a 256 backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz
 ```
 
 ### Restore Jenkins Home
@@ -978,6 +1008,29 @@ Check environment:
 DOCKER_HOST: "unix:///docker.sock"
 ```
 
+Check the socket ACL and verify access as the same user used by Pipeline jobs:
+
+```bash
+docker compose exec ci-arm64-docker getfacl -p /docker.sock
+docker compose exec --user jenkins ci-arm64-docker docker version
+```
+
+Expected ACL entry:
+
+```text
+user:jenkins:rw-
+```
+
+If it is missing, rebuild the Docker agent image and recreate that service:
+
+```bash
+make rebuild-agent-docker
+docker compose up -d --no-deps --force-recreate ci-arm64-docker
+```
+
+Recreating an SSH agent can change its host key. If Jenkins blocks the new
+connection, review and trust the new key as described in section 11.
+
 ---
 
 ### 20.8 Anonymous hash volumes are created
@@ -1069,3 +1122,258 @@ Open:
 ```text
 https://apps.localmac.net:8444/
 ```
+
+---
+
+## 23. Jenkins LTS Upgrade Record: 2026-08-09
+
+This section records the upgrade that was actually performed on this project.
+It is both an audit record and the reference procedure for the next LTS update.
+
+### 23.1 Goal and preserved architecture
+
+The controller was upgraded from Jenkins `2.555.2 LTS` to the current stable
+Jenkins `2.568.1 LTS`, while keeping Java 21 and the existing architecture:
+
+```text
+2.555.2-lts-jdk21
+        -> 2.555.3-lts-jdk21
+        -> 2.568.1-lts-jdk21
+```
+
+The intermediate `2.555.3` boot was used because the Jenkins `2.568.1` upgrade
+guide describes the transition from `2.555.3`. Docker Compose, JCasC, Caddy,
+named volumes, SSH agents, credentials, workspaces, and local TLS were retained.
+No reset, volume deletion, image pruning, or agent base-image refresh was
+performed.
+
+Final controller references are kept consistent in:
+
+* `controller/Dockerfile`
+* `docker-compose.yml`
+* `Makefile`
+
+The final controller base image is:
+
+```dockerfile
+FROM jenkins/jenkins:2.568.1-lts-jdk21
+```
+
+The official base image resolved during this upgrade to:
+
+```text
+sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02
+```
+
+### 23.2 Pre-upgrade baseline and rollback backup
+
+Before any image or volume migration, the following checks passed:
+
+```bash
+docker compose config --quiet
+docker compose ps -a
+docker system df
+```
+
+All five project services were stopped. The Jenkins Home metadata reported
+`2.555.2`, and 90 plugin files were present in the named volume.
+
+A cold backup was then created:
+
+```text
+backup/output/jenkins_home_20260809-112146.tar.gz
+```
+
+Recorded validation data:
+
+```text
+size: 256 MiB
+SHA-256: ce81b598163a1b2a5ebca7e677e9cba1b20c78d06a1fc2138fd0a0bdbf446163
+```
+
+The archive passed both `gzip -t` and `tar tzf` checks before the upgrade
+continued. Backup archives contain Jenkins configuration, credentials, secrets,
+users, and job history; keep them private and do not commit them.
+
+### 23.3 Plugin compatibility work
+
+The first `2.555.3` controller build intentionally stopped at the plugin
+compatibility gate. The old top-level pin:
+
+```text
+junit:1403.vd9d1413fd205
+```
+
+was lower than the `junit:1413...` version required by the newly resolved
+`matrix-project` dependency. No controller was started by that failed build.
+
+`jenkins-plugin-cli --available-updates` was then run against both Jenkins
+`2.555.3` and `2.568.1`. Both targets returned the same compatible top-level
+updates, and `controller/plugins.txt` was updated to these tested pins:
+
+```text
+configuration-as-code:2116.v98dde145b_dce
+credentials-binding:728.v902a_273b_8947
+matrix-auth:3.3
+docker-workflow:647.vf474049b_b_303
+cloudbees-folder:6.1106.v3a_d9a_6d2465e
+pipeline-graph-view:980.vb_db_0b_e5f683c
+junit:1418.v67a_81935603c
+```
+
+The other ten direct plugin pins were unchanged. Both controller images then
+built successfully with 90 resolved direct and transitive plugins.
+
+The persisted `pipeline-graph-view` plugin had previously been upgraded from
+the Jenkins UI, so its installed version differed from the image marker. The
+controller now declares:
+
+```yaml
+PLUGINS_FORCE_UPGRADE: "true"
+TRY_UPGRADE_IF_NO_MARKER: "true"
+```
+
+This makes the image-built `plugins.txt` the authoritative baseline even when
+plugins were manually upgraded or have no older Docker version marker. Future
+plugin upgrades should therefore be made in `controller/plugins.txt` and
+verified by rebuilding the controller, not only through the Jenkins UI.
+
+### 23.4 Executed core upgrade sequence
+
+After the cold backup and compatible plugin lock update, the actual sequence
+was:
+
+```bash
+# Temporary repository version: 2.555.3-lts-jdk21
+docker compose config --quiet
+docker compose --progress=plain build --no-cache jenkins-controller
+docker compose up -d --no-build jenkins-controller
+docker compose ps jenkins-controller
+docker compose logs --no-color --tail=250 jenkins-controller
+
+# Stop after the intermediate validation
+docker compose stop jenkins-controller
+
+# Final repository version: 2.568.1-lts-jdk21
+docker compose config --quiet
+docker compose --progress=plain build --no-cache --pull jenkins-controller
+docker compose up -d --no-build jenkins-controller
+docker compose logs --no-color --tail=260 jenkins-controller
+
+# Start the unchanged proxy and agents without rebuilding them
+docker compose up -d --no-build
+```
+
+The intermediate log confirmed `2.555.2 -> 2.555.3`. The final log confirmed
+`2.555.3 -> 2.568.1`, followed by `Started all plugins`, `Completed
+initialization`, and `Jenkins is fully up and running`.
+
+The obsolete JCasC `remotingSecurity` entry was removed after Jenkins reported
+that its `AdminWhitelistRule` setting no longer has any effect. The remaining
+JCasC controller, authorization, credentials, location, and three-node
+configuration was retained.
+
+### 23.5 Executed verification and observed results
+
+The following project checks were run after the final startup:
+
+```bash
+make verify
+make verify-volumes
+make verify-agents
+make verify-docker-agent
+```
+
+Observed results:
+
+* Jenkins controller reported `2.568.1` and Temurin Java `21.0.11`.
+* Controller, Caddy, and all three agents reached `healthy` status.
+* Jenkins authentication succeeded with the administrator from `.env`.
+* All 90 plugins loaded; the seven updated direct plugin versions matched
+  `plugins.txt`.
+* JCasC retained the secured local realm and global matrix authorization.
+* Jenkins API reported `ci-arm64-general`, `ci-arm64-alm`, and
+  `ci-arm64-docker` online and not temporarily offline.
+* Controller-to-agent TCP port 22 checks passed for all agents.
+* Named volumes, read-only JCasC mount, Docker secret, tmpfs mounts, and Docker
+  socket mount remained in their original architecture.
+* Caddy returned HTTP/2 200 from `https://apps.localmac.net:8444/login`.
+
+A temporary Pipeline named `upgrade-smoke-2-568-1` was created from
+`examples/pipelines/check-agents.Jenkinsfile`. Its first run exposed a flaw in
+the old verification method: `make verify-docker-agent` ran as root, while real
+Pipeline steps run as `jenkins`, and the mounted OrbStack socket was
+`root:root 0660`.
+
+After explicit approval, only the `jenkins` user was granted a socket ACL:
+
+```text
+user:jenkins:rw-
+```
+
+The Docker agent image was rebuilt with the `acl` package, Compose was updated
+to apply this ACL before starting `sshd`, and `make verify-docker-agent` was
+changed to execute as `jenkins`. Pipeline run number 2 then completed with
+`SUCCESS` across all three stages, including Docker Engine, Compose, and Buildx.
+The temporary Jenkins task was deleted after the successful run.
+
+The running Docker agent was repaired in place to preserve its already trusted
+SSH host key. Its rebuilt image and updated entrypoint will apply the same ACL
+automatically on the next container recreation. A future forced recreation may
+generate a new SSH host key and require the administrator to trust it again.
+
+### 23.6 Rollback procedure
+
+Never start an older Jenkins core against a Jenkins Home that has already been
+migrated by a newer core. Roll back the image and the matching Home backup
+together.
+
+For this upgrade, the rollback point is the `2.555.2` controller image plus:
+
+```text
+backup/output/jenkins_home_20260809-112146.tar.gz
+```
+
+Rollback sequence:
+
+```bash
+docker compose down
+
+# Restore controller/Dockerfile, docker-compose.yml, Makefile,
+# controller/plugins.txt, and casc/jenkins.yaml from the pre-upgrade revision.
+
+make restore \
+  ARCHIVE=backup/output/jenkins_home_20260809-112146.tar.gz
+
+docker compose up -d --no-build
+docker compose ps
+make verify
+make verify-agents
+```
+
+If the old local controller image is unavailable, rebuild it from the
+pre-upgrade revision before starting the restored volume. Do not run `make
+reset`, `make reset-all`, or `docker compose down -v` during an upgrade or
+rollback, because those commands delete the named volumes that preserve Jenkins
+state.
+
+### 23.7 Procedure for the next LTS upgrade
+
+For future upgrades, repeat the same control points:
+
+1. Read every skipped LTS upgrade guide and confirm the controller and all
+   agents meet the required Java version.
+2. Stop the stack, create a cold backup, verify the archive, and record its
+   checksum.
+3. Keep the old image and never reuse its tag for the new controller.
+4. Ask `jenkins-plugin-cli` for updates using the target core version; update
+   and pin direct plugins before building.
+5. Treat any plugin dependency error as a stop condition.
+6. If crossing an LTS baseline, boot and verify the final patch of the current
+   LTS line first.
+7. Start only the controller, inspect the full initialization log, then start
+   Caddy and agents.
+8. Verify as the real runtime identities, especially Docker access as
+   `jenkins`, and run the three-agent smoke Pipeline.
+9. Retain the old image and cold backup until the upgraded installation has
+   survived normal jobs and at least one planned restart.

@@ -58,7 +58,7 @@ services:
     <<: *jenkins-common
     build:
       context: ./controller
-    image: local/jenkins-controller:2.555.2-lts-jdk21
+    image: local/jenkins-controller:2.568.1-lts-jdk21
     container_name: jenkins-controller
     ports:
       # Bind the raw Jenkins HTTP port to loopback only; external access should go through Caddy/TLS.
@@ -73,6 +73,11 @@ services:
       JENKINS_ADMIN_ID: "${JENKINS_ADMIN_ID:?Set JENKINS_ADMIN_ID in .env}"
       JENKINS_ADMIN_PASSWORD: "${JENKINS_ADMIN_PASSWORD:?Set JENKINS_ADMIN_PASSWORD in .env}"
       JENKINS_URL: "${JENKINS_URL:-https://apps.localmac.net:8444/}"
+      # Treat the image-built plugins.txt as the authoritative plugin baseline,
+      # including plugins that were previously upgraded from the Jenkins UI.
+      PLUGINS_FORCE_UPGRADE: "true"
+      # Also upgrade legacy plugin files that predate Docker image version markers.
+      TRY_UPGRADE_IF_NO_MARKER: "true"
       JAVA_OPTS: >-
         -Djenkins.install.runSetupWizard=false
         -Djava.awt.headless=true
@@ -150,6 +155,17 @@ services:
       JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY:?Set JENKINS_AGENT_SSH_PUBKEY in .env}"
       # Docker socket is mounted outside /var/run so /var/run can be tmpfs without nested mount ambiguity.
       DOCKER_HOST: "unix:///docker.sock"
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - |
+        # OrbStack and Docker Desktop commonly expose this socket as root:root.
+        # Grant only the Jenkins user access to this file instead of adding it
+        # to the broad root group, then start the standard SSH agent service.
+        setfacl -m u:jenkins:rw /docker.sock
+        mkdir -p /run/sshd
+        chmod 0755 /run/sshd
+        exec /usr/local/bin/setup-sshd
     volumes:
       - ci_arm64_docker_home:/home/jenkins/agent
       # Security trade-off:

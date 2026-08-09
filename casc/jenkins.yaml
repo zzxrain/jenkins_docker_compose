@@ -25,10 +25,6 @@ jenkins:
             permissions:
               - "Overall/Administer"
 
-  # Enable remoting security to reduce the attack surface of inbound/agent communication.
-  remotingSecurity:
-    enabled: true
-
   nodes:
     # Generic Linux agent for ordinary CI tasks that do not need ALM tooling or Docker socket access.
     - permanent:

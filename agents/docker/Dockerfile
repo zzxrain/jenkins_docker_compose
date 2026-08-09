@@ -14,6 +14,7 @@ RUN apt-get update \
       procps \
       iputils-ping \
       netcat-openbsd \
+      acl \
       gnupg \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
