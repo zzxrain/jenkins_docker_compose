@@ -33,3 +33,20 @@ apps.localmac.net:443 {
 		header_up X-Forwarded-Port 8444
 	}
 }
+
+# Local TLS endpoint for GitLab. GitLab publishes its canonical URL on 8445 but
+# serves plain HTTP only inside the shared local-tooling-edge Docker network.
+apps.localmac.net:8445 {
+	tls {
+		issuer internal {
+			lifetime 7d
+		}
+	}
+
+	reverse_proxy gitlab:80 {
+		header_up Host apps.localmac.net:8445
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-Port 8445
+		header_up X-Forwarded-Ssl on
+	}
+}

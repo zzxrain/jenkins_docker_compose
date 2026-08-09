@@ -5,6 +5,7 @@ ENV_FILE ?= .env
 SECRETS_DIR ?= secrets
 CERTS_DIR ?= certs
 AGENT_KEY ?= $(SECRETS_DIR)/jenkins_agent_key
+TOOLING_EDGE_NETWORK ?= local-tooling-edge
 # Keep large Jenkins Home archives outside the Git repository by default.
 BACKUP_DIR ?= $(HOME)/DevTools/Backup/jenkins-docker
 
@@ -15,7 +16,7 @@ AGENT_DOCKER_IMAGE ?= local/jenkins-ssh-agent-docker:debian-jdk21
 .PHONY: help
 help:
 	@echo "Available targets:"
-	@echo "  make init                 Initialize .env and SSH key material"
+	@echo "  make init                 Initialize .env, SSH key material, and shared tooling network"
 	@echo "  make validate             Validate docker compose configuration"
 	@echo "  make build                Build all images with normal cache"
 	@echo "  make rebuild-controller   Rebuild Jenkins controller image with --no-cache"
@@ -39,8 +40,8 @@ help:
 	@echo "  make restore ARCHIVE=...  Restore Jenkins home from backup"
 	@echo "  make prune-volumes        Prune unused Docker volumes"
 
-.PHONY: init
-init:
+.PHONY: init ensure-tooling-network
+init: ensure-tooling-network
 	@if [ ! -f $(ENV_FILE) ]; then cp .env.example $(ENV_FILE); echo "Created $(ENV_FILE) from .env.example"; fi
 	@mkdir -p $(SECRETS_DIR)
 	@if [ ! -f $(AGENT_KEY) ]; then ssh-keygen -t ed25519 -f $(AGENT_KEY) -N '' -C jenkins-agent; fi
@@ -54,6 +55,11 @@ init:
 	    echo "JENKINS_AGENT_SSH_PUBKEY already customized. Current generated public key:"; \
 	    cat $(AGENT_KEY).pub; \
 	  fi
+
+ensure-tooling-network:
+	@docker network inspect $(TOOLING_EDGE_NETWORK) >/dev/null 2>&1 \
+	  || docker network create --driver bridge $(TOOLING_EDGE_NETWORK) >/dev/null
+	@echo "Shared tooling network ready: $(TOOLING_EDGE_NETWORK)"
 
 .PHONY: validate
 validate:
@@ -95,7 +101,7 @@ rebuild-agent-docker:
 rebuild-agents: rebuild-agent-base rebuild-agent-docker
 
 .PHONY: up down clean reset reset-images reset-all
-up: build
+up: ensure-tooling-network build
 	$(COMPOSE) up -d
 
 down:

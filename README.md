@@ -38,13 +38,18 @@ This project is designed for local development and technical validation on macOS
 ```text
 Browser / curl
     |
-    | https://apps.localmac.net:8444/
+    +-- https://apps.localmac.net:8444/ --> Jenkins
+    |
+    +-- https://apps.localmac.net:8445/ --> GitLab (optional sibling stack)
     v
 Caddy
     |
-    | http://jenkins-controller:8080
+    +-- http://jenkins-controller:8080
+    +-- http://gitlab:80 over local-tooling-edge
+         (when the GitLab Compose lab is running)
+    |
     v
-Jenkins Controller
+Jenkins Controller and optional GitLab
     |
     | SSH port 22
     v
@@ -748,6 +753,20 @@ Caddy exposes Jenkins over local HTTPS:
 
 ```text
 https://apps.localmac.net:8444/
+```
+
+The same Caddy instance can expose the sibling GitLab Compose lab at
+`https://apps.localmac.net:8445/`. Both routes use the persisted Caddy local CA,
+so the exported root certificate only needs to be trusted once. GitLab joins the
+external `local-tooling-edge` network and serves internal HTTP to Caddy; it does
+not receive the Caddy root private key or manage a separate server certificate.
+
+Create the shared network before starting either stack. `make init` and
+`make up` do this automatically, or run:
+
+```bash
+docker network inspect local-tooling-edge >/dev/null 2>&1 \
+  || docker network create --driver bridge local-tooling-edge
 ```
 
 This local development stack deliberately configures different lifetimes for
