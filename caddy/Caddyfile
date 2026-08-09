@@ -1,15 +1,35 @@
+# This stack is commonly stopped between local development sessions. Keep the
+# long-lived root CA unchanged, but extend the intermediate CA beyond Caddy's
+# 7-day default so short periods of downtime do not immediately invalidate the
+# entire served chain. Caddy still manages and rotates this certificate.
+{
+	pki {
+		ca local {
+			intermediate_lifetime 30d
+		}
+	}
+}
+
 # Local TLS endpoint for Jenkins.
 # The host port is mapped as 8444:443 in docker-compose.yml, so Jenkins must see
 # X-Forwarded-Port as 8444 to generate correct absolute URLs and avoid reverse proxy warnings.
 apps.localmac.net:443 {
-    # Use Caddy's internal CA for local HTTPS simulation.
-    # The generated root CA may need to be trusted manually on macOS.
-    tls internal
+	# Use Caddy's internal CA for local HTTPS simulation.
+	# The root CA keeps Caddy's 10-year default and remains in caddy_data. A
+	# 7-day leaf certificate is a development-friendly compromise for a stack
+	# that may be stopped for several days; Caddy renews it automatically while
+	# running. The leaf lifetime must remain shorter than the 30-day intermediate.
+	# The generated root CA may need to be trusted manually on the host OS.
+	tls {
+		issuer internal {
+			lifetime 7d
+		}
+	}
 
-    reverse_proxy jenkins-controller:8080 {
-        header_up Host {http.request.host}
-        header_up X-Forwarded-Proto https
-        header_up X-Forwarded-Host {http.request.host}
-        header_up X-Forwarded-Port 8444
-    }
+	reverse_proxy jenkins-controller:8080 {
+		header_up Host {http.request.host}
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-Host {http.request.host}
+		header_up X-Forwarded-Port 8444
+	}
 }

@@ -117,12 +117,15 @@ services:
       jenkins-controller:
         condition: service_healthy
     healthcheck:
-      # This validates the proxy binary is present; upstream readiness is handled by depends_on.
-      test: ["CMD", "caddy", "version"]
+      # Validate the live HTTPS endpoint against the local root CA that Caddy
+      # installs into the container's system trust store from persisted data.
+      # This catches an expired or incomplete certificate chain instead of only
+      # confirming that the Caddy binary exists. It also verifies the upstream.
+      test: ["CMD", "wget", "-q", "--spider", "https://apps.localmac.net/login"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 20s
 
   ci-arm64-general:
     <<: *agent-common

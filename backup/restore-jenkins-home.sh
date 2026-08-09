@@ -8,9 +8,14 @@ COMPOSE="${COMPOSE:-docker compose}"
 VOLUME_NAME="${JENKINS_HOME_VOLUME:-$(${COMPOSE} config --format json | jq -r '.volumes.jenkins_home.name // empty')}"
 
 if [[ -z "${ARCHIVE}" || ! -f "${ARCHIVE}" ]]; then
-  echo "Usage: CONFIRM_RESTORE=RESTORE $0 backup/output/jenkins_home_YYYYmmdd-HHMMSS.tar.gz" >&2
+  echo "Usage: CONFIRM_RESTORE=RESTORE $0 \"\${HOME}/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz\"" >&2
   exit 2
 fi
+
+# Mount only the selected archive's directory so absolute paths outside the
+# repository work without exposing the rest of the host filesystem.
+ARCHIVE_DIR="$(cd "$(dirname "${ARCHIVE}")" && pwd -P)"
+ARCHIVE_NAME="$(basename "${ARCHIVE}")"
 
 # Use an environment guard so CI/non-interactive runs must opt in to destructive restore behavior.
 if [[ "${CONFIRM_RESTORE:-}" != "RESTORE" ]]; then
@@ -27,8 +32,9 @@ fi
 # Clear the volume before extraction so deleted files do not survive across restores.
 docker run --rm \
   -v "${VOLUME_NAME}:/var/jenkins_home" \
-  -v "$(pwd):/repo:ro" \
+  -v "${ARCHIVE_DIR}:/backup:ro" \
   alpine:3.20 \
-  sh -c 'rm -rf /var/jenkins_home/* /var/jenkins_home/.[!.]* /var/jenkins_home/..?* 2>/dev/null || true; tar xzf "/repo/'"${ARCHIVE}"'" -C /var/jenkins_home'
+  sh -c 'rm -rf /var/jenkins_home/* /var/jenkins_home/.[!.]* /var/jenkins_home/..?* 2>/dev/null || true; tar xzf "/backup/$1" -C /var/jenkins_home' \
+  _ "${ARCHIVE_NAME}"
 
 echo "Restore completed into ${VOLUME_NAME}."
