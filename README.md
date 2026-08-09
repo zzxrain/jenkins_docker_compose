@@ -4,6 +4,18 @@ A reproducible local Jenkins CI/CD lab based on Docker Compose, Jenkins Configur
 
 This project is designed for local development and technical validation on macOS, especially with OrbStack or Docker Desktop.
 
+### Where to start
+
+| Task | Use this section |
+| --- | --- |
+| First installation | [6. Build and Start from Scratch](#6-build-and-start-from-scratch) |
+| Normal start and stop | [6.2 Daily start and stop](#62-daily-start-and-stop) |
+| Verify a running stack | [22. Running-stack acceptance checklist](#22-running-stack-acceptance-checklist) |
+| Back up or restore Jenkins | [18. Backup and Restore](#18-backup-and-restore) |
+| Diagnose a failure | [20. Troubleshooting](#20-troubleshooting) |
+| Upgrade Jenkins | [25. Safe Manual Jenkins Upgrade Runbook](#25-safe-manual-jenkins-upgrade-runbook) |
+| Review applied changes | [24. Update History](#24-update-history) |
+
 ## Features
 
 * Jenkins controller with Configuration as Code
@@ -61,7 +73,8 @@ Jenkins Controller
 │   └── plugins.txt
 ├── agents/
 │   ├── base/
-│   │   └── Dockerfile
+│   │   ├── Dockerfile
+│   │   └── persist-ssh-host-keys
 │   └── docker/
 │       └── Dockerfile
 ├── backup/
@@ -70,7 +83,7 @@ Jenkins Controller
 ├── secrets/
 │   └── .gitkeep
 └── certs/
-    └── caddy-local-root.crt
+    └── caddy-local-root.crt  # generated locally; absent in a fresh clone
 ```
 
 Generated local files such as `.env`, private keys, Caddy certificates, and
@@ -87,10 +100,12 @@ Recommended environment:
 * OrbStack or Docker Desktop
 * Docker Compose v2
 * GNU Make
+* Git
 * `ssh-keygen`
 * `openssl`
 * `jq`
 * `curl`
+* `tar`, `gzip`, and `shasum` (or an equivalent SHA-256 tool)
 
 Check local tools:
 
@@ -98,10 +113,40 @@ Check local tools:
 docker version
 docker compose version
 make --version
+git --version
+command -v ssh-keygen
 openssl version
 jq --version
 curl --version
+tar --version || bsdtar --version
+gzip --version
 ```
+
+Check the Docker host assumptions:
+
+```bash
+docker info --format 'architecture={{.Architecture}} os={{.OSType}}'
+test -S /var/run/docker.sock
+lsof -nP -iTCP:8089 -sTCP:LISTEN || true
+lsof -nP -iTCP:8444 -sTCP:LISTEN || true
+```
+
+The committed node names and labels say `arm64`; they are accurate for the
+Apple Silicon host used by this lab. On an `amd64` host, Linux containers may
+still run, but update the node names, descriptions, and labels in JCasC so jobs
+are not scheduled using a false architecture label. Ports 8089 and 8444 must
+not already belong to another process. The Docker Agent also requires the host
+socket at `/var/run/docker.sock`; adjust its bind mount explicitly if the Docker
+runtime exposes a different path.
+
+On an already running stack, seeing Docker Desktop or OrbStack listening on
+8089 and 8444 is expected. Before the first start, any listener on either port
+is a conflict that must be stopped or reflected in both Compose and the
+documented URL/forwarded port.
+
+The first image build and each cold backup may need network access to pull base
+images such as Jenkins, Caddy, Debian, and `alpine:3.20`. Confirm Docker can pull
+images before scheduling an offline maintenance window.
 
 ---
 
@@ -117,8 +162,17 @@ Make sure `apps.localmac.net` resolves to local loopback.
 
 ### macOS / Linux
 
+Check first, then add the entry only if it is missing:
+
 ```bash
-sudo sh -c 'echo "127.0.0.1 apps.localmac.net" >> /etc/hosts'
+grep -E '^[[:space:]]*127\.0\.0\.1[[:space:]]+.*apps\.localmac\.net([[:space:]]|$)' /etc/hosts \
+  || echo '127.0.0.1 apps.localmac.net' | sudo tee -a /etc/hosts
+```
+
+Verify resolution:
+
+```bash
+ping -c 1 apps.localmac.net
 ```
 
 ### Windows
@@ -133,6 +187,12 @@ Add:
 
 ```text
 127.0.0.1 apps.localmac.net
+```
+
+Verify with:
+
+```powershell
+Resolve-DnsName apps.localmac.net
 ```
 
 ---
@@ -152,6 +212,16 @@ This will:
 * generate `secrets/jenkins_agent_key.pub`
 * write the public key into `.env`
 
+`make init` does not overwrite an existing `.env`. If `.env` already contains
+a customized public key and the private key is missing or regenerated, update
+`JENKINS_AGENT_SSH_PUBKEY` manually so the two files match:
+
+```bash
+ssh-keygen -y -f secrets/jenkins_agent_key
+grep '^JENKINS_AGENT_SSH_PUBKEY=' .env
+chmod 600 .env secrets/jenkins_agent_key
+```
+
 Typical `.env` content:
 
 ```env
@@ -168,6 +238,13 @@ Change the default admin password before starting Jenkins:
 JENKINS_ADMIN_PASSWORD=your-new-password
 ```
 
+A shell-safe random value can be generated with:
+
+```bash
+openssl rand -hex 24
+chmod 600 .env
+```
+
 Do not commit:
 
 ```text
@@ -176,23 +253,38 @@ secrets/jenkins_agent_key
 secrets/jenkins_agent_key.pub
 ```
 
+Do not run `source .env` or `. .env`. This is a Docker Compose environment file,
+not a shell script; the unquoted SSH public key contains spaces and would be
+parsed as a command. Let Compose read it, or parse only an explicitly required
+key without evaluating the file.
+
 ---
 
 ## 6. Build and Start from Scratch
 
-Recommended clean setup:
+### 6.1 First installation
+
+A fresh clone has nothing to reset. Initialize `.env` and the Agent key before
+running any Compose-backed Make target, because Compose intentionally rejects
+missing required variables:
 
 ```bash
 git pull
-make reset-all
 make init
+
+# Edit .env now; at minimum replace change-me-please.
+chmod 600 .env
 make validate
 
 make rebuild-controller
 make rebuild-agents
 
-docker compose up -d
+docker compose up -d --no-build
 ```
+
+Do not run the two Agent rebuild targets concurrently and do not use `make -j`:
+the Docker Agent must be built after its local base image. Section 7 explains
+the dependency.
 
 Check service status:
 
@@ -209,6 +301,38 @@ ci-arm64-general
 ci-arm64-alm
 ci-arm64-docker
 ```
+
+On the first start, continue in this order:
+
+1. Wait for all five Compose services to become healthy.
+2. Export and trust the Caddy root using sections 14-16.
+3. Sign in to Jenkins and trust each Agent host key using section 11.
+4. Run the acceptance checklist in section 22, including the example Pipeline.
+
+To intentionally erase and recreate an existing disposable lab, first create
+any backup you need, then use `make reset-all`. That target is destructive and
+must never appear in an upgrade or rollback sequence.
+
+### 6.2 Daily start and stop
+
+Start existing images and persisted data without an implicit rebuild:
+
+```bash
+docker compose up -d --no-build
+make ps
+```
+
+Stop the stack while preserving Jenkins Home, Agent workspaces and host keys,
+and the Caddy local CA:
+
+```bash
+make down
+```
+
+Use `make up` when a normal cached image build is intentional. After pulling
+source changes that modify Dockerfiles, plugins, or Compose build inputs, use
+the applicable rebuild target first. Do not use reset targets for routine
+start/stop operations.
 
 ---
 
@@ -240,6 +364,12 @@ make backup
 make restore ARCHIVE="$HOME/DevTools/Backup/jenkins-docker/<archive>.tar.gz"
 make prune-volumes
 ```
+
+Targets that require running containers (`verify`, `verify-volumes`,
+`verify-agents`, `verify-docker-agent`, `logs`, and `export-caddy-root`) should
+be used only after the relevant services have started. Destructive targets are
+summarized in section 19; in particular, `reset`, `reset-all`, and
+`prune-volumes` are not routine maintenance commands.
 
 ### Important notes for agent rebuild
 
@@ -278,6 +408,10 @@ rebuild-agent-docker:
 rebuild-agents: rebuild-agent-base rebuild-agent-docker
 ```
 
+Run `make rebuild-agents` normally, without `-j`. GNU Make parallel mode can
+violate the required local-image ordering even though the two recipes are
+listed in sequence.
+
 ---
 
 ## 8. Verify Jenkins Controller
@@ -287,6 +421,10 @@ Run:
 ```bash
 make verify
 ```
+
+This is a failing validation, not only a report. It checks the runtime Jenkins
+and Java versions, required plugins, secured realm/authorization XML, all 17
+direct plugin pins, and the absence of failed or disabled plugin markers.
 
 Expected plugin output includes:
 
@@ -311,6 +449,12 @@ If you see the following, JCasC has not been applied correctly:
 ```xml
 AuthorizationStrategy$Unsecured
 SecurityRealm$None
+```
+
+Success ends with:
+
+```text
+Controller verification passed.
 ```
 
 Check logs:
@@ -340,6 +484,16 @@ jenkins-docker_ci_arm64_alm_home
 jenkins-docker_ci_arm64_docker_home
 ```
 
+These names assume the default Compose project name derived from this directory.
+They may have a different prefix when `COMPOSE_PROJECT_NAME`, `-p`, or the
+checkout directory changes. Use labels and the rendered model instead of
+hard-coding the prefix in scripts:
+
+```bash
+docker compose config --volumes
+docker volume ls --filter label=app=jenkins-compose
+```
+
 Agent runtime paths should be `tmpfs`, not anonymous hash volumes:
 
 ```text
@@ -347,6 +501,15 @@ Agent runtime paths should be `tmpfs`, not anonymous hash volumes:
 /run
 /tmp
 /var/run
+```
+
+`make verify-volumes` prints volume/bind mounts and `tmpfs` mounts in separate
+blocks because Docker exposes them through different inspection fields. It
+then fails if a mounted Docker volume lacks this project's label or any Agent
+is missing one of the four required `tmpfs` paths. Success ends with:
+
+```text
+Volume and tmpfs verification passed.
 ```
 
 If you see hash-named volumes mounted to these paths, check `docker-compose.yml` and make sure agent common configuration contains:
@@ -384,6 +547,9 @@ docker compose logs --tail=100 ci-arm64-general
 docker compose logs --tail=100 ci-arm64-alm
 docker compose logs --tail=100 ci-arm64-docker
 ```
+
+The target returns a nonzero status if any Agent TCP check fails, so it can also
+be used as a CI or scripted acceptance gate.
 
 ---
 
@@ -457,20 +623,32 @@ Look for the host key trust prompt and approve the SSH host key.
 
 After approval, relaunch the agent.
 
-### Why this happens again after reset
+### Host key persistence and reset behavior
 
-If you recreate agent containers, their SSH host keys may change.
+Each agent stores its SSH server host keys in the root-owned
+`.ssh-host-keys` directory inside that agent's named workspace volume. The
+`persist-ssh-host-keys` helper restores those keys before `sshd` starts.
+Consequently, ordinary container operations preserve the trusted identity:
 
-Operations that can cause this:
+```bash
+docker compose down
+docker compose up -d
+docker compose up -d --force-recreate
+```
+
+The host key changes only when the corresponding named volume is removed, for
+example by:
 
 ```bash
 make reset
 make reset-all
 docker compose down -v
-docker compose up --force-recreate
 ```
 
-When host keys change, Jenkins will ask for trust approval again.
+After a volume reset, the agent generates a new host key and Jenkins correctly
+requires a new manual trust decision. The persisted private host keys remain
+root-owned with mode `0600`; Pipeline jobs running as `jenkins` cannot read
+them.
 
 ### Local-only alternative: disable host key verification
 
@@ -496,6 +674,10 @@ docker compose restart jenkins-controller
 ```
 
 This is convenient for local testing, but it is not recommended for production-like validation.
+
+The repository default is manual verification. If you temporarily change this
+setting, record the local deviation and restore it before using the lab for
+security-sensitive or production-like tests.
 
 ---
 
@@ -525,6 +707,9 @@ docker buildx version
 docker compose version
 ```
 
+The target uses `set -euo pipefail` and returns nonzero if any of these commands
+fails; all three results are required.
+
 The Docker-capable agent uses:
 
 ```yaml
@@ -550,6 +735,10 @@ reduce the inherent privilege of Docker daemon access: any process that can use
 the socket has root-equivalent control of the Docker host.
 
 This gives the agent high privilege over the host Docker daemon. Only trusted pipelines should run on Docker-capable labels.
+
+The host architecture and Docker daemon are shared with Pipeline workloads;
+container isolation does not make access to `/docker.sock` safe for unreviewed
+code.
 
 ---
 
@@ -613,8 +802,13 @@ automatically, restart only that service and inspect its logs:
 ```bash
 docker compose restart caddy
 docker compose logs --tail=100 caddy
-curl -Iv https://apps.localmac.net:8444/
+curl --cacert certs/caddy-local-root.crt -Iv \
+  https://apps.localmac.net:8444/
 ```
+
+Do not delete `caddy_data` as a first repair step. Deleting it replaces the
+local root CA and invalidates the certificate already trusted by the host. Use
+the certificate troubleshooting flow in section 20.9 first.
 
 ### Certificate lifetime change performed on 2026-08-09
 
@@ -676,6 +870,9 @@ certs/caddy-local-root.crt
 ```
 
 Only export the certificate file. Do not export or share Caddy private keys.
+Re-export after an intentional `caddy_data` reset, compare the SHA-256
+fingerprint with the certificate in the host trust store, and replace the old
+trusted root if it changed.
 
 ---
 
@@ -819,6 +1016,7 @@ consistent:
 
 ```bash
 docker compose down
+df -h "$HOME/DevTools/Backup/jenkins-docker" 2>/dev/null || df -h "$HOME"
 make backup
 ```
 
@@ -850,18 +1048,45 @@ Validate the archive before changing the controller version:
 gzip -t "$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
 tar tzf "$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz" >/dev/null
 shasum -a 256 "$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
+chmod 600 "$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
 ```
+
+The archive contains Jenkins configuration, job history, credentials, and the
+Jenkins secrets needed to decrypt those credentials. It is compressed, not
+encrypted. Store it as sensitive data, keep it outside Git, and protect any
+off-host copy with encryption and access controls.
+
+This script backs up only the `jenkins_home` named volume. A full lab recovery
+also needs the matching Git revision plus securely retained local copies of
+`.env` and `secrets/jenkins_agent_key`. Agent workspaces and Caddy's private CA
+volumes are intentionally not included. The exported Caddy root certificate is
+public material and cannot reconstruct the CA private key.
 
 ### Restore Jenkins Home
 
+Before restoring, verify the archive again and check out the repository version
+that matches it. The local `.env` and Agent private key must also match the
+restored configuration:
+
 ```bash
+RESTORE_ARCHIVE="$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
+gzip -t "$RESTORE_ARCHIVE"
+tar tzf "$RESTORE_ARCHIVE" >/dev/null
+
 make restore \
-  ARCHIVE="$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
+  ARCHIVE="$RESTORE_ARCHIVE"
+
+docker compose up -d --no-build
+make ps
+make verify
 ```
 
 The restore script accepts archives outside the repository and mounts only the
-selected archive's parent directory read-only. Restore is destructive. Use only
-with a known-good backup.
+selected archive's parent directory read-only. `make restore` stops Compose,
+clears the Jenkins Home volume, and extracts the selected archive; it does not
+start the stack afterward. Restore is destructive and is not a merge. Use only
+with a known-good backup, and never restore an older Home while leaving a newer
+controller image configured.
 
 ### Backup directory migration performed on 2026-08-09
 
@@ -888,11 +1113,17 @@ content was deleted.
 make down
 ```
 
-### Stop and remove orphan containers
+This runs `docker compose down`: it stops and removes the project containers
+and network while preserving named volumes and images.
+
+### Stop and remove project and orphan containers
 
 ```bash
 make clean
 ```
+
+This has the same persistence behavior as `make down` and additionally removes
+orphaned Compose services.
 
 ### Remove project containers, networks, and project volumes
 
@@ -900,14 +1131,20 @@ make clean
 make reset
 ```
 
+> **Irreversible unless separately backed up.** This runs `docker compose down
+> -v --remove-orphans`. Confirm the Compose project and backup path before
+> continuing.
+
 This deletes:
 
 * Jenkins home
 * Caddy local CA
 * Caddy config volume
 * agent workspaces
+* persisted Agent SSH host keys
 
-After `make reset`, you must export and trust the new Caddy root CA again.
+After `make reset`, Jenkins starts empty, every Agent requires a new host-key
+trust decision, and you must export and trust the new Caddy root CA again.
 
 ### Remove local project images
 
@@ -915,11 +1152,17 @@ After `make reset`, you must export and trust the new Caddy root CA again.
 make reset-images
 ```
 
+This preserves named volumes but removes the three project-built image tags.
+They must be rebuilt before `docker compose up -d --no-build` can succeed.
+
 ### Full reset
 
 ```bash
 make reset-all
 ```
+
+This combines `make reset` and `make reset-images`; it is intended only for a
+deliberate disposable-lab rebuild.
 
 ### Prune unused Docker volumes
 
@@ -927,7 +1170,10 @@ make reset-all
 make prune-volumes
 ```
 
-Do not use aggressive global prune commands unless you understand the impact on other local projects.
+This invokes Docker's **global** unused-volume prune, not a project-scoped
+cleanup. Inspect `docker volume ls` first. Prefer removing an exact, verified
+unused volume with `docker volume rm <volume-name>`; do not prune when another
+local project may rely on a stopped container's data.
 
 ---
 
@@ -1001,8 +1247,13 @@ Then rebuild agents:
 
 ```bash
 make rebuild-agents
-docker compose up -d --force-recreate
+docker compose up -d --no-build --force-recreate \
+  ci-arm64-general ci-arm64-alm ci-arm64-docker
 ```
+
+Rebuilding and recreating only the three Agent services avoids an unnecessary
+controller or Caddy replacement. Their persisted SSH host identities should
+remain unchanged; compare them as described in section 11.
 
 ---
 
@@ -1014,23 +1265,29 @@ The agent uses `tmpfs` for `/run`. The `/run/sshd` directory must exist before `
 
 Fix:
 
-Add an agent entrypoint wrapper in `x-agent-common`:
+Do not replace the current entrypoint with a shortened `/run/sshd`-only
+wrapper, because that would disable SSH host-key persistence. The common Agent
+entrypoint must perform both operations in this order:
 
 ```yaml
 entrypoint:
   - /bin/bash
   - -lc
   - |
+    persist-ssh-host-keys /home/jenkins/agent/.ssh-host-keys
     mkdir -p /run/sshd
     chmod 0755 /run/sshd
     exec /usr/local/bin/setup-sshd
 ```
 
-Then recreate containers:
+The Docker Agent has its own service-specific entrypoint; it must run `setfacl`
+first and then the same persistence and `/run/sshd` setup. Rebuild in dependency
+order and recreate only the Agents:
 
 ```bash
-docker compose down --remove-orphans
-docker compose up -d
+make rebuild-agents
+docker compose up -d --no-build --force-recreate \
+  ci-arm64-general ci-arm64-alm ci-arm64-docker
 ```
 
 ---
@@ -1044,7 +1301,9 @@ Symptom:
 Connections will be denied until this new key is authorised.
 ```
 
-This is expected when manual SSH host key trust is enabled.
+This is expected only on the first connection or after an intentional Agent
+workspace-volume reset. It is not expected after an ordinary container
+recreation because this project persists host keys.
 
 Fix:
 
@@ -1057,6 +1316,15 @@ Manage Jenkins
 ```
 
 Then relaunch the agent.
+
+If there was no known volume reset, compare the presented fingerprint with:
+
+```bash
+docker compose exec -T <agent-service> \
+  ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+Investigate an unexplained change instead of approving it automatically.
 
 ---
 
@@ -1134,8 +1402,13 @@ make rebuild-agent-docker
 docker compose up -d --no-deps --force-recreate ci-arm64-docker
 ```
 
-Recreating an SSH agent can change its host key. If Jenkins blocks the new
-connection, review and trust the new key as described in section 11.
+If the change was in `agents/base`, run `make rebuild-agent-base` before
+`make rebuild-agent-docker`; rebuilding only the Docker Agent would otherwise
+reuse a stale local base image.
+
+Ordinary Agent recreation retains its host key in the named workspace volume.
+If the volume was deleted and Jenkins blocks the newly generated key, review
+and trust it as described in section 11.
 
 ---
 
@@ -1166,12 +1439,86 @@ tmpfs:
   - /var/run
 ```
 
-Then recreate containers:
+Then recreate only the Agent containers using the corrected Compose model:
 
 ```bash
-docker compose down -v --remove-orphans
-docker compose up -d
+docker compose up -d --no-build --force-recreate \
+  ci-arm64-general ci-arm64-alm ci-arm64-docker
+make verify-volumes
 ```
+
+Do **not** use `docker compose down -v` for this repair. It deletes Jenkins
+Home, the Caddy CA, Agent workspaces, and persisted host keys. Old anonymous
+volumes may remain unused after recreation; inspect each exact volume before
+removing it, or leave it until a deliberately reviewed global prune.
+
+---
+
+### 20.9 Caddy certificate is expired or untrusted
+
+First distinguish a leaf/intermediate expiry from a changed local root:
+
+```bash
+docker compose ps caddy
+docker compose logs --tail=150 caddy
+
+# Currently served leaf certificate.
+openssl s_client \
+  -connect apps.localmac.net:8444 \
+  -servername apps.localmac.net </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates -fingerprint -sha256
+
+# CA certificates currently persisted by Caddy.
+docker compose cp \
+  caddy:/data/caddy/pki/authorities/local/root.crt \
+  /tmp/caddy-local-root-current.crt
+docker compose cp \
+  caddy:/data/caddy/pki/authorities/local/intermediate.crt \
+  /tmp/caddy-local-intermediate-current.crt
+openssl x509 -in /tmp/caddy-local-root-current.crt \
+  -noout -subject -issuer -dates -fingerprint -sha256
+openssl x509 -in /tmp/caddy-local-intermediate-current.crt \
+  -noout -subject -issuer -dates -fingerprint -sha256
+
+# Root previously exported for host trust.
+openssl x509 -in certs/caddy-local-root.crt \
+  -noout -subject -issuer -dates -fingerprint -sha256
+```
+
+If only the served leaf or intermediate expired while the stack was stopped,
+preserve `caddy_data`, restart Caddy, and retest with the exported root:
+
+```bash
+docker compose restart caddy
+docker compose logs --tail=150 caddy
+curl --cacert certs/caddy-local-root.crt -Iv \
+  https://apps.localmac.net:8444/login
+```
+
+If the root fingerprint inside `caddy_data` differs because that volume was
+intentionally reset, run `make export-caddy-root`, remove the obsolete trusted
+root from the OS trust store, and trust the newly exported certificate. Never
+delete `caddy_data` merely to force leaf renewal.
+
+---
+
+### 20.10 Compose reports a missing required variable
+
+Symptoms include errors for `JENKINS_ADMIN_ID`, `JENKINS_ADMIN_PASSWORD`, or
+`JENKINS_AGENT_SSH_PUBKEY` before any container starts.
+
+Run:
+
+```bash
+make init
+grep -E '^(JENKINS_URL|JENKINS_ADMIN_ID|JENKINS_ADMIN_PASSWORD|JENKINS_AGENT_SSH_PUBKEY)=' .env \
+  | cut -d= -f1
+docker compose config --quiet
+```
+
+If the Agent key was regenerated, make sure the public key derived from
+`secrets/jenkins_agent_key` matches the value in `.env` as described in section
+5. Do not bypass the required-variable checks with empty placeholder values.
 
 ---
 
@@ -1183,9 +1530,13 @@ Important notes:
 
 * Do not commit `.env`
 * Do not commit `secrets/jenkins_agent_key`
+* Keep `.env` and the Agent private key mode `0600`; both are plaintext local secrets
+* Treat Jenkins Home backup archives as sensitive credential-bearing data
 * Do not share Caddy private keys
+* Trust the Caddy local root only on development hosts that need this lab, and remove obsolete roots after a CA reset
 * Change `JENKINS_ADMIN_PASSWORD`
 * Do not expose the raw Jenkins controller port beyond loopback
+* Port `127.0.0.1:8089` is plain HTTP intended only for host-local diagnostics; use Caddy HTTPS for normal access
 * The Docker-capable agent has high privilege because it can access the host Docker socket
 * Do not run untrusted pipelines on the Docker-capable agent
 * Keep manual SSH host key verification enabled if you want production-like behavior
@@ -1193,18 +1544,15 @@ Important notes:
 
 ---
 
-## 22. Recommended Full Startup Sequence
+## 22. Running-stack Acceptance Checklist
+
+Use this after a first installation, a configuration/image change, a restore,
+or a planned restart. It does not reset data and assumes the images were already
+built deliberately:
 
 ```bash
-git pull
-make reset-all
-make init
 make validate
-
-make rebuild-controller
-make rebuild-agents
-
-docker compose up -d
+docker compose up -d --no-build
 
 make ps
 make verify
@@ -1215,7 +1563,49 @@ make verify-docker-agent
 make export-caddy-root
 ```
 
-Then import:
+Expected results:
+
+* all five Compose services are `healthy`;
+* the controller security realm and matrix authorization are enabled;
+* all mounts are named volumes, bind mounts, or intentional `tmpfs` mounts;
+* controller-to-Agent TCP port 22 succeeds for all three Agents;
+* all three nodes are online in Jenkins after any first-time host-key trust;
+* Docker Engine, Compose, and Buildx work as the `jenkins` user; and
+* the HTTPS login endpoint returns HTTP 200 with the expected Jenkins version.
+
+Confirm all three configured Agents are online without sourcing `.env`:
+
+```bash
+admin_id=$(docker compose config --format json \
+  | jq -r '.services["jenkins-controller"].environment.JENKINS_ADMIN_ID')
+admin_password=$(docker compose config --format json \
+  | jq -r '.services["jenkins-controller"].environment.JENKINS_ADMIN_PASSWORD')
+
+curl --globoff -fsS -u "$admin_id:$admin_password" \
+  'http://127.0.0.1:8089/computer/api/json?tree=computer[displayName,offline,temporarilyOffline]' \
+  | jq -e '
+      .computer
+      | map(select(.displayName != "Built-In Node"))
+      | length == 3
+        and all(.[]; (.offline == false and .temporarilyOffline == false))
+    '
+
+unset admin_id admin_password
+```
+
+Expected output is `true`. `--globoff` is required because the Jenkins API
+tree expression contains square brackets. The credentials remain in shell
+variables only for this command and are immediately unset.
+
+Verify HTTPS using the exported root directly:
+
+```bash
+curl --cacert certs/caddy-local-root.crt \
+  -fsSI https://apps.localmac.net:8444/login \
+  | grep -Ei '^(HTTP/|x-jenkins:)'
+```
+
+On a first installation or after a Caddy CA reset, import:
 
 ```text
 certs/caddy-local-root.crt
@@ -1229,16 +1619,23 @@ Open:
 https://apps.localmac.net:8444/
 ```
 
+Finally, create a temporary Jenkins Pipeline from
+`examples/pipelines/check-agents.Jenkinsfile`. A complete acceptance test must
+finish with `SUCCESS` on the General, ALM, and Docker stages. Delete the
+temporary job afterward. Host-side checks alone do not replace this Pipeline
+because it exercises the identities and labels used by real jobs.
+
 ---
 
 ## 23. Jenkins LTS Upgrade Record: 2026-08-09
 
 This section records the upgrade that was actually performed on this project.
-It is both an audit record and the reference procedure for the next LTS update.
+It is an audit record of that migration, not the procedure for a future update;
+section 25 is the authoritative upgrade runbook.
 
 ### 23.1 Goal and preserved architecture
 
-The controller was upgraded from Jenkins `2.555.2 LTS` to the current stable
+The controller was upgraded from Jenkins `2.555.2 LTS` to the then-targeted
 Jenkins `2.568.1 LTS`, while keeping Java 21 and the existing architecture:
 
 ```text
@@ -1259,7 +1656,7 @@ Final controller references are kept consistent in:
 * `docker-compose.yml`
 * `Makefile`
 
-The final controller base image is:
+The controller base image at the end of that upgrade was:
 
 ```dockerfile
 FROM jenkins/jenkins:2.568.1-lts-jdk21
@@ -1428,6 +1825,8 @@ The running Docker agent was repaired in place to preserve its already trusted
 SSH host key. Its rebuilt image and updated entrypoint will apply the same ACL
 automatically on the next container recreation. A future forced recreation may
 generate a new SSH host key and require the administrator to trust it again.
+That lifecycle limitation was subsequently fixed during the `2.568.2` update;
+see section 24.2.
 
 ### 23.6 Rollback procedure
 
@@ -1466,21 +1865,545 @@ state.
 
 ### 23.7 Procedure for the next LTS upgrade
 
-For future upgrades, repeat the same control points:
+Use the command-by-command runbook in section 25. It incorporates the failure
+modes found during both upgrades and defines a stop condition for every unsafe
+transition. Do not reconstruct an upgrade procedure from this historical
+section alone.
 
-1. Read every skipped LTS upgrade guide and confirm the controller and all
-   agents meet the required Java version.
-2. Stop the stack, create a cold backup, verify the archive, and record its
-   checksum.
-3. Keep the old image and never reuse its tag for the new controller.
-4. Ask `jenkins-plugin-cli` for updates using the target core version; update
-   and pin direct plugins before building.
-5. Treat any plugin dependency error as a stop condition.
-6. If crossing an LTS baseline, boot and verify the final patch of the current
-   LTS line first.
-7. Start only the controller, inspect the full initialization log, then start
-   Caddy and agents.
-8. Verify as the real runtime identities, especially Docker access as
-   `jenkins`, and run the three-agent smoke Pipeline.
-9. Retain the old image and cold backup until the upgraded installation has
-   survived normal jobs and at least one planned restart.
+---
+
+## 24. Update History
+
+This is the append-only chronological index of changes actually applied to the
+running lab. Add each future Jenkins, plugin, agent, proxy, or operational
+update as a new dated subsection. Keep section 23 as the detailed reference for
+the first cross-LTS migration procedure.
+
+### 24.1 2026-08-09 — Jenkins 2.555.2 to 2.568.1 LTS
+
+Purpose:
+
+* Move the controller to the Jenkins `2.568` LTS baseline while retaining JDK
+  21, Compose, JCasC, named volumes, Caddy, credentials, and all three agents.
+* Apply the required intermediate boot through `2.555.3`.
+* Refresh and lock the compatible direct plugin baseline.
+
+Executed sequence:
+
+```text
+2.555.2-lts-jdk21
+        -> 2.555.3-lts-jdk21
+        -> 2.568.1-lts-jdk21
+```
+
+Rollback archive:
+
+```text
+/Users/pandahorn/DevTools/Backup/jenkins-docker/jenkins_home_20260809-112146.tar.gz
+SHA-256: ce81b598163a1b2a5ebca7e677e9cba1b20c78d06a1fc2138fd0a0bdbf446163
+```
+
+Results:
+
+* Jenkins started on `2.568.1` with Temurin Java `21.0.11`.
+* All 90 resolved plugins loaded and the 17 direct plugin pins were retained.
+* Controller, Caddy, and all three agents reached `healthy`.
+* The three-stage smoke Pipeline succeeded after Docker socket access was
+  corrected for the real `jenkins` runtime identity.
+* Caddy TLS lifetimes and the external backup directory were subsequently
+  adjusted and recorded in their respective README sections.
+
+This version was superseded later the same day after the Jenkins UI exposed the
+2026-08-05 core security advisory and the official `2.568.2` LTS fix.
+
+### 24.2 2026-08-09 — Jenkins 2.568.1 to 2.568.2 LTS
+
+Reason:
+
+* Jenkins `2.568.1` and earlier were affected by the core vulnerabilities in
+  the [Jenkins Security Advisory 2026-08-05](https://www.jenkins.io/security/advisory/2026-08-05/).
+* The advisory specifies `2.568.2` as the fixed LTS release. The patch retains
+  the same `2.568` LTS baseline and JDK 21 runtime.
+
+Changed controller references:
+
+* `controller/Dockerfile`
+* `docker-compose.yml`
+* `Makefile`
+
+The resulting controller uses:
+
+```dockerfile
+FROM jenkins/jenkins:2.568.2-lts-jdk21
+```
+
+The official base image resolved during the build to:
+
+```text
+sha256:8547df3b0db2803d158ecc9499207a056bb30c23fddc18bb5b4a4dc14e77dd09
+```
+
+Pre-upgrade rollback point:
+
+```text
+controller: local/jenkins-controller:2.568.1-lts-jdk21
+archive: /Users/pandahorn/DevTools/Backup/jenkins-docker/jenkins_home_20260809-162121.tar.gz
+size: 258 MiB
+SHA-256: 4c1c2233af867aa9df827cc19ba96c7cb0dc3418f896da09f6adac8daf3768dd
+```
+
+The cold archive passed `gzip -t`, a complete `tar tzf` listing, and SHA-256
+verification before the controller version changed.
+
+Executed upgrade and verification:
+
+1. Confirmed that the official `2.568.2-lts-jdk21` multi-architecture image tag
+   was available.
+2. Stopped all five services and created the external cold backup above.
+3. Built `local/jenkins-controller:2.568.2-lts-jdk21`; plugin resolution against
+   the target core completed successfully without changing the 17 direct pins.
+4. Started only the controller and inspected its complete initialization log.
+   It reported `2.568.1 -> 2.568.2`, `Started all plugins`, `Completed
+   initialization`, and `Jenkins is fully up and running`.
+5. Confirmed Jenkins `2.568.2`, Temurin Java `21.0.11`, 90 loaded plugin files,
+   zero failed/disabled plugin markers, and exact agreement with every direct
+   plugin pin.
+6. Confirmed JCasC security, named volumes, read-only configuration, Docker
+   secret, Docker socket ACL, and controller-to-agent TCP connectivity.
+7. Confirmed all five Compose services were healthy, all three Jenkins agents
+   were online, and `https://apps.localmac.net:8444/login` returned HTTP 200.
+8. Confirmed the Jenkins management page no longer displayed the 2026-08-05
+   core advisory and the HTTP response header reported `X-Jenkins: 2.568.2`.
+
+The full-stack restart exposed an existing lifecycle defect: Agent containers
+generated new SSH host keys on recreation while Jenkins correctly enforced
+manual trust. The fix keeps each Agent's host keys in its root-only named
+workspace volume and restores them before `sshd` starts. The verified ED25519
+fingerprints are:
+
+```text
+ci-arm64-general  SHA256:7SAf9VbAn6v54NAb+spjhnYahFyHLEDOC3hN6XMsBbg
+ci-arm64-alm      SHA256:tDJ6OgEnxoraEff6SUAatbkcaLf7NKg9bttEvxn0OJU
+ci-arm64-docker   SHA256:UP2F9rouAm2kUqYszZE6o8BJw3d6k9Dn9LZnh4GYE+8
+```
+
+After one explicit review and trust operation, all three Agent containers were
+force-recreated a second time. Their fingerprints remained identical and all
+nodes reconnected without another trust action.
+
+Finally, temporary Pipeline `upgrade-smoke-2-568-2` build number 1 ran
+`examples/pipelines/check-agents.Jenkinsfile` and completed with `SUCCESS` on
+the General, ALM, and Docker agents, including Docker Engine, Compose, and
+Buildx calls as the `jenkins` user. The temporary job was deleted immediately
+after verification.
+
+Rollback for this patch requires both the `2.568.1` repository/image state and
+the matching `jenkins_home_20260809-162121.tar.gz` archive above. Do not start
+the older core against the Home directory after migration without restoring the
+matching backup.
+
+### 24.3 2026-08-09 — Post-upgrade runbook hardening
+
+After the `2.568.2` upgrade, the documentation was reviewed against the exact
+commands and failures observed during the work. Section 25 was added as the
+authoritative manual upgrade runbook. In particular, it prevents these
+previously encountered mistakes:
+
+* selecting an already vulnerable LTS patch instead of checking the latest
+  security advisory and current patch release;
+* creating large backups inside the Git working tree;
+* deleting named volumes with `make reset`, `make reset-all`, or
+  `docker compose down -v` during an upgrade;
+* building the Docker Agent concurrently with, or before, its local base image;
+* using `--pull` for the Docker Agent's local-only base image;
+* treating a root-only Docker socket test as proof that Pipeline jobs work;
+* recreating Agents without understanding when their manually trusted SSH host
+  identities are preserved or intentionally replaced;
+* starting the full stack before the upgraded controller has passed standalone
+  initialization checks; and
+* rolling an image back without restoring its matching pre-upgrade Jenkins Home.
+
+### 24.4 2026-08-09 — Full operational documentation audit
+
+The non-upgrade instructions were compared with the current Makefile, Compose
+model, JCasC, Caddy configuration, backup/restore scripts, and Agent images.
+The review made these operational corrections:
+
+* removed destructive `make reset-all` calls from normal first-start and
+  acceptance flows;
+* placed `make init` before every first Compose validation and documented
+  existing `.env`/Agent-key mismatch handling and why Compose `.env` must not be
+  sourced as a shell script;
+* added a predictable `--no-build` daily start/stop workflow;
+* documented Compose project-dependent volume names and destructive Make target
+  boundaries;
+* clarified that Jenkins Home archives are sensitive, external to Git, and do
+  not include `.env`, the Agent private key, Agent workspaces, or Caddy CA data;
+* made restore steps include integrity checks, matching repository/image state,
+  explicit restart, and post-restore verification;
+* replaced the anonymous-volume repair that previously used destructive
+  `docker compose down -v` with Agent-only recreation;
+* corrected Agent rebuild and `/run/sshd` repair examples so SSH host-key
+  persistence is not lost;
+* hardened `make verify`, `make verify-volumes`, `make verify-agents`, and
+  `make verify-docker-agent` to fail on invalid security, plugin-pin
+  mismatches, failed plugins, unexpected volumes/tmpfs, unreachable Agents, or
+  unusable Docker tooling;
+* added Caddy leaf, intermediate, persisted-root, and exported-root diagnosis;
+  and
+* replaced the old reset-based startup chapter with a non-destructive
+  running-stack acceptance checklist and real three-Agent Pipeline test.
+
+---
+
+## 25. Safe Manual Jenkins Upgrade Runbook
+
+This is the authoritative procedure for future controller upgrades. Run it
+from the repository root. Replace the example versions and archive name with
+the values for that upgrade; do not copy a historical version blindly.
+
+### 25.1 Decide the exact target before editing files
+
+1. Check the official [Jenkins LTS release line](https://www.jenkins.io/download/lts/),
+   [LTS changelog](https://www.jenkins.io/changelog-stable/),
+   [upgrade guides](https://www.jenkins.io/doc/upgrade-guide/), and
+   [security advisories](https://www.jenkins.io/security/advisories/). Use the
+   latest fixed patch in the intended LTS line. A version that was current a
+   few days earlier may already be affected by a newly published advisory.
+2. Confirm the exact official Docker tag exists, including its JDK suffix and
+   required CPU architecture. This project intentionally remains on JDK 21:
+
+   ```text
+   jenkins/jenkins:<target>-lts-jdk21
+   ```
+
+   Inspect the manifest without changing the running stack:
+
+   ```bash
+   docker buildx imagetools inspect jenkins/jenkins:<target>-lts-jdk21
+   ```
+
+3. If only the patch changes inside the same LTS line, for example
+   `2.568.1 -> 2.568.2`, upgrade directly. If crossing LTS baselines, read every
+   skipped upgrade guide and first boot the latest patch of the current LTS line
+   when Jenkins requires or recommends that intermediate step.
+4. Confirm Java requirements for both controller and Agents before proceeding.
+
+**Stop if:** the target tag does not exist for the host architecture, a skipped
+upgrade guide has not been reviewed, or the required Java version is unknown.
+
+### 25.2 Capture a clean baseline and rollback pair
+
+Validate the current repository and runtime before stopping anything:
+
+```bash
+git status --short --branch
+git rev-parse HEAD
+docker compose config --quiet
+docker compose ps -a
+docker compose exec -T jenkins-controller /opt/java/openjdk/bin/java -version
+docker compose exec -T jenkins-controller \
+  /opt/java/openjdk/bin/java -jar /usr/share/jenkins/jenkins.war --version
+docker image inspect "$(docker compose config --images | grep 'local/jenkins-controller:')" \
+  --format '{{json .RepoTags}} {{.Id}} {{.Created}}'
+for service in ci-arm64-general ci-arm64-alm ci-arm64-docker; do
+  docker compose exec -T "$service" \
+    ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+done
+```
+
+Record the current Git commit, controller image tag/ID, Jenkins version, Java
+version, service health, and the three Agent ED25519 fingerprints. Commit or
+intentionally set aside unrelated local changes so the pre-upgrade repository
+state can be recovered exactly.
+
+Create a **cold** Jenkins Home backup. Ordinary `docker compose down` removes
+containers and the project network but preserves named volumes:
+
+```bash
+docker compose down
+make backup
+```
+
+The script prints the exact archive path. It defaults to the host directory
+below, outside the Git repository:
+
+```text
+$HOME/DevTools/Backup/jenkins-docker/
+```
+
+Copy the printed path into a shell variable and validate the entire archive:
+
+```bash
+UPGRADE_BACKUP="$HOME/DevTools/Backup/jenkins-docker/jenkins_home_YYYYmmdd-HHMMSS.tar.gz"
+test -f "$UPGRADE_BACKUP"
+gzip -t "$UPGRADE_BACKUP"
+tar tzf "$UPGRADE_BACKUP" >/dev/null
+shasum -a 256 "$UPGRADE_BACKUP"
+```
+
+Record the path, size, and SHA-256 in section 24 before changing the controller.
+Do not use `make reset`, `make reset-all`, or `docker compose down -v`: all three
+delete named volumes. `make reset-all` also removes local rollback images. Do
+not use the old repository-local `backup/output` path.
+
+**Stop if:** the baseline is already unhealthy, the archive is missing, either
+archive integrity command fails, or the rollback image/revision cannot be
+identified.
+
+### 25.3 Change all authoritative version references together
+
+Update the controller version in all three files:
+
+```text
+controller/Dockerfile  FROM jenkins/jenkins:<target>-lts-jdk21
+docker-compose.yml     image: local/jenkins-controller:<target>-lts-jdk21
+Makefile               CONTROLLER_IMAGE ?= local/jenkins-controller:<target>-lts-jdk21
+```
+
+Check that no active reference still points to the old version:
+
+```bash
+rg -n '<old-version>|<target-version>' \
+  controller/Dockerfile docker-compose.yml Makefile
+docker compose config --quiet
+```
+
+Historical entries in section 23 and section 24 must keep their original
+versions. Do not mechanically replace the old version throughout README.
+
+`controller/plugins.txt` contains the 17 direct plugin pins and is the
+source-controlled plugin baseline. Review available plugin updates against the
+target core. The controller build runs `jenkins-plugin-cli` for the target
+image and resolves transitive dependencies; do not rely only on what the
+currently running Jenkins UI offers.
+
+**Stop if:** the three active version references disagree, Compose validation
+fails, or a direct plugin update has not been checked against the target core.
+
+### 25.4 Build the controller and treat plugin errors as fatal
+
+Build only the controller first:
+
+```bash
+docker compose --progress=plain build --no-cache --pull jenkins-controller
+```
+
+The build must finish successfully, show `jenkins-plugin-cli` resolving the
+plugin set, and produce the exact new local tag. Record the resolved official
+base-image digest from the build output when maintaining the update history.
+
+Do not rebuild Agents for a controller-only patch. If Agent source also changed,
+build them **sequentially**, only after the base build has completely finished:
+
+```bash
+make rebuild-agent-base
+make rebuild-agent-docker
+```
+
+The Docker Agent starts with:
+
+```dockerfile
+FROM local/jenkins-ssh-agent-base:debian-jdk21
+```
+
+Therefore, do not build the two Agent images concurrently and do not add
+`--pull` to the Docker Agent build. Either mistake can build from a stale local
+base or make Docker try and fail to pull `docker.io/local/...`.
+
+**Stop if:** `jenkins-plugin-cli` reports a dependency/core-version conflict,
+the resulting controller tag is wrong, or the Docker Agent build did not use
+the newly completed local base image.
+
+### 25.5 Start and approve the controller before the rest of the stack
+
+Start only the upgraded controller against the backed-up Home:
+
+```bash
+docker compose up -d --no-build jenkins-controller
+docker compose ps jenkins-controller
+docker compose logs --no-color jenkins-controller
+```
+
+Wait for all of these messages, not merely a running container:
+
+```text
+Started all plugins
+Completed initialization
+Jenkins is fully up and running
+```
+
+Do not shorten this first review to a small log tail: the version-migration and
+early plugin messages can occur well before the final readiness message.
+
+Also check the recorded upgrade path and runtime versions:
+
+```bash
+docker compose exec -T jenkins-controller bash -lc '
+  /opt/java/openjdk/bin/java -version
+  /opt/java/openjdk/bin/java -jar /usr/share/jenkins/jenkins.war --version
+  printf "lastExecVersion="
+  cat /var/jenkins_home/jenkins.install.InstallUtil.lastExecVersion
+  find /var/jenkins_home/plugins -maxdepth 1 -type f \
+    \( -name "*.jpi" -o -name "*.hpi" \) | wc -l
+  find /var/jenkins_home/plugins -maxdepth 1 -type f \
+    \( -name "*.jpi.failed" -o -name "*.hpi.failed" \
+       -o -name "*.jpi.disabled" -o -name "*.hpi.disabled" \) -print
+'
+make verify
+```
+
+Compare every direct pin in `controller/plugins.txt` with the installed plugin
+manifests:
+
+```bash
+docker compose exec -T jenkins-controller bash -lc '
+  set -euo pipefail
+  while IFS=: read -r plugin expected; do
+    [ -n "$plugin" ] || continue
+    file="/var/jenkins_home/plugins/${plugin}.jpi"
+    [ -f "$file" ] || file="/var/jenkins_home/plugins/${plugin}.hpi"
+    [ -f "$file" ]
+    actual=$(unzip -p "$file" META-INF/MANIFEST.MF |
+      sed -n "s/^Plugin-Version: //p" | tr -d "\r" | head -1)
+    printf "%s expected=%s actual=%s\n" "$plugin" "$expected" "$actual"
+    [ "$actual" = "$expected" ]
+  done < /usr/share/jenkins/ref/plugins.txt
+'
+```
+
+This command exits nonzero for a missing or mismatched direct plugin. A
+successful HTTP healthcheck alone does not prove that all plugins loaded.
+Review the complete initialization log for failed plugins, JCasC exceptions,
+detached-plugin warnings, or migration errors.
+
+**Stop if:** the controller is unhealthy, the version is not the target,
+`lastExecVersion` is wrong, a failed/disabled marker exists, a direct plugin pin
+does not match, or the required initialization messages are absent.
+
+### 25.6 Start Caddy and Agents without accidental rebuilds
+
+After the controller passes standalone checks, start the unchanged services:
+
+```bash
+docker compose up -d --no-build
+docker compose ps
+```
+
+All five services must become healthy. `--no-build` is intentional here: it
+prevents Compose from unexpectedly rebuilding an Agent after the controlled
+build phase.
+
+Agent SSH host keys are restored from root-only `.ssh-host-keys` directories in
+their named workspace volumes. Thus normal `down`, `up`, and `--force-recreate`
+operations preserve the Jenkins-trusted identities. Compare these values with
+the pre-upgrade fingerprints recorded in section 25.2:
+
+```bash
+for service in ci-arm64-general ci-arm64-alm ci-arm64-docker; do
+  docker compose exec -T "$service" \
+    ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+done
+```
+
+If a workspace volume was deleted, or the stack is being upgraded from a
+revision that predates `persist-ssh-host-keys`, a new fingerprint is expected.
+Review it and use **Manage Jenkins -> Nodes -> node -> Log / Launch agent ->
+Trust SSH host key** once. Never disable verification merely to make an
+unexpected key change disappear. A changed key without a known volume reset is
+a stop condition and must be investigated.
+
+When Agent images were changed, force-recreate them only after their sequential
+builds and then repeat the fingerprint comparison:
+
+```bash
+docker compose up -d --no-build --force-recreate \
+  ci-arm64-general ci-arm64-alm ci-arm64-docker
+```
+
+### 25.7 Verify the same paths and identities used by real jobs
+
+Run the project checks:
+
+```bash
+make ps
+make verify
+make verify-volumes
+make verify-agents
+make verify-docker-agent
+```
+
+`make verify-docker-agent` intentionally runs as `jenkins`. Do not substitute a
+root shell test: the `root:root 0660` Docker socket previously passed as root
+while a real Pipeline failed. The Docker Agent entrypoint grants only the
+`jenkins` user a socket ACL, which must be re-applied successfully on every
+container start.
+
+In Jenkins, select **New Item**, create a temporary **Pipeline**, copy the full
+contents of `examples/pipelines/check-agents.Jenkinsfile` into **Pipeline ->
+Script**, save, and select **Build Now**. It must finish with `SUCCESS` on
+General, ALM, and Docker stages; the Docker stage must execute Engine, Compose,
+and Buildx commands as `jenkins`. Delete the temporary job after recording the
+result.
+
+Then verify the externally used endpoint and target version:
+
+```bash
+curl --cacert certs/caddy-local-root.crt \
+  -fsSI https://apps.localmac.net:8444/login \
+  | grep -Ei '^(HTTP/|x-jenkins:)'
+```
+
+Confirm HTTP 200, `X-Jenkins: <target>`, all three nodes online, JCasC security
+still enabled, and no applicable core advisory on **Manage Jenkins**. Finally,
+perform one planned full-stack container recreation, not merely `restart`, and
+repeat health, fingerprint, node, Pipeline, and HTTPS checks:
+
+```bash
+docker compose down
+docker compose up -d --no-build
+```
+
+This catches host-key and startup lifecycle defects that an in-place process
+restart or first boot cannot reveal.
+
+**The upgrade is complete only when:** the standalone controller gate, all five
+service healthchecks, three-node Pipeline, real-identity Docker check, HTTPS
+check, security-advisory check, and planned-restart check all pass.
+
+### 25.8 Roll back image and Home as one unit
+
+Do not start an older Jenkins image against Home after a newer core has migrated
+it. Restore both halves of the rollback pair captured in section 25.2:
+
+1. Stop the stack with `docker compose down`.
+2. Restore the exact pre-upgrade Git revision, or revert all controller/plugin/
+   JCasC changes to that revision.
+3. Confirm the old local controller image still exists; rebuild it from the old
+   revision if necessary.
+4. Restore the matching cold archive:
+
+   ```bash
+   make restore ARCHIVE="$UPGRADE_BACKUP"
+   ```
+
+5. Start without rebuilding and repeat the normal verification:
+
+   ```bash
+   docker compose up -d --no-build
+   make ps
+   make verify
+   make verify-volumes
+   make verify-agents
+   make verify-docker-agent
+   ```
+
+`make restore` is destructive: it stops Compose, clears the Jenkins Home named
+volume, and extracts the selected archive. It does not restore repository files
+or the controller image, which is why those must be returned to the matching
+pre-upgrade state first.
+
+Retain the old image and verified cold backup until the new installation has
+survived normal jobs and at least one planned restart. Append the target,
+backup checksum, image digest, commands, results, exceptions, and rollback pair
+to section 24 so the next upgrade starts from an auditable state.

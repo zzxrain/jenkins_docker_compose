@@ -47,8 +47,8 @@ jenkins:
               # Production-like SSH host key verification:
               # Jenkins will not blindly trust this SSH agent on the first connection.
               # An administrator must approve the presented SSH host key in the Jenkins UI.
-              # If the agent container is recreated and its host key changes, Jenkins will block
-              # the connection again until the new key is explicitly reviewed and trusted.
+              # Host keys persist in each Agent workspace volume. A new trust decision is expected
+              # only on first use or after that named volume is intentionally deleted/reset.
               manuallyTrustedKeyVerificationStrategy:
                 requireInitialManualTrust: true
 
@@ -73,8 +73,8 @@ jenkins:
               # Production-like SSH host key verification:
               # Jenkins will not blindly trust this SSH agent on the first connection.
               # An administrator must approve the presented SSH host key in the Jenkins UI.
-              # If the agent container is recreated and its host key changes, Jenkins will block
-              # the connection again until the new key is explicitly reviewed and trusted.
+              # Host keys persist in each Agent workspace volume. A new trust decision is expected
+              # only on first use or after that named volume is intentionally deleted/reset.
               manuallyTrustedKeyVerificationStrategy:
                 requireInitialManualTrust: true
 

@@ -16,4 +16,7 @@ RUN apt-get update \
       netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
 
+COPY persist-ssh-host-keys /usr/local/bin/persist-ssh-host-keys
+RUN chmod 0755 /usr/local/bin/persist-ssh-host-keys
+
 USER root

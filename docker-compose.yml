@@ -32,12 +32,14 @@ x-agent-common: &agent-common
     - /tmp
     - /var/run
 
-  # /run is tmpfs, so /run/sshd is empty on every container start.
-  # Create it before delegating to the original Jenkins ssh-agent setup script.
+  # Persist SSH server host keys in each agent's named workspace volume. This
+  # preserves the manually trusted identity across ordinary container rebuilds.
+  # /run is tmpfs, so /run/sshd is recreated on every container start.
   entrypoint:
     - /bin/bash
     - -lc
     - |
+      persist-ssh-host-keys /home/jenkins/agent/.ssh-host-keys
       mkdir -p /run/sshd
       chmod 0755 /run/sshd
       exec /usr/local/bin/setup-sshd
@@ -58,7 +60,7 @@ services:
     <<: *jenkins-common
     build:
       context: ./controller
-    image: local/jenkins-controller:2.568.1-lts-jdk21
+    image: local/jenkins-controller:2.568.2-lts-jdk21
     container_name: jenkins-controller
     ports:
       # Bind the raw Jenkins HTTP port to loopback only; external access should go through Caddy/TLS.
@@ -166,6 +168,7 @@ services:
         # Grant only the Jenkins user access to this file instead of adding it
         # to the broad root group, then start the standard SSH agent service.
         setfacl -m u:jenkins:rw /docker.sock
+        persist-ssh-host-keys /home/jenkins/agent/.ssh-host-keys
         mkdir -p /run/sshd
         chmod 0755 /run/sshd
         exec /usr/local/bin/setup-sshd
