@@ -107,9 +107,10 @@ services:
     image: caddy:2
     container_name: jenkins-caddy
     ports:
-      # Bind local HTTPS to loopback only for this local lab.
+      # Use one local Caddy authority and ingress for the Jenkins and GitLab labs.
       # Remove 127.0.0.1 only when you intentionally want LAN access.
       - "127.0.0.1:8444:443"
+      - "127.0.0.1:8445:8445"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # Persist Caddy's local CA and runtime config to avoid regenerating certificates on every restart.
@@ -118,6 +119,11 @@ services:
     depends_on:
       jenkins-controller:
         condition: service_healthy
+    networks:
+      jenkins:
+      tooling-edge:
+        aliases:
+          - apps.localmac.net
     healthcheck:
       # Validate the live HTTPS endpoint against the local root CA that Caddy
       # installs into the container's system trust store from persisted data.
@@ -186,6 +192,11 @@ networks:
   jenkins:
     # A single private bridge keeps Jenkins internals reachable by service name without exposing agents to the host.
     driver: bridge
+  tooling-edge:
+    # Create this shared network once before starting Caddy or GitLab:
+    # docker network create local-tooling-edge
+    external: true
+    name: local-tooling-edge
 
 volumes:
   jenkins_home:
